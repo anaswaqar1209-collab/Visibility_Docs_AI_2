@@ -1,0 +1,108 @@
+import os
+import json
+import asyncio
+import logging
+import functools
+from concurrent.futures import ThreadPoolExecutor
+from ..database import SupabaseDB
+from ..config import settings
+from ..models.schemas import DocumentStatus
+from .orchestrator_service import orchestrator
+
+logger = logging.getLogger("visibility-docs")
+_pool = ThreadPoolExecutor(max_workers=4)
+
+
+class DocumentService:
+    async def create_document(self, organization_id: str, title: str, file_info: dict, uploaded_by: str = None) -> dict:
+        import datetime
+        now = datetime.datetime.utcnow().isoformat()
+        doc_id = __import__("uuid").uuid4().hex
+        doc_data = {
+            "id": doc_id,
+            "organization_id": organization_id,
+            "title": title,
+            "status": DocumentStatus.UPLOADED.value,
+            "original_file_url": file_info["file_path"],
+            "file_size": file_info["file_size"],
+            "file_hash": file_info.get("file_hash", ""),
+            "uploaded_by": uploaded_by or "",
+            "created_at": now,
+            "updated_at": now,
+        }
+
+        result = SupabaseDB.insert("documents", doc_data)
+        if hasattr(result, "data") and result.data:
+            return result.data[0]
+        return doc_data
+
+    async def process_document(self, document_id: str, organization_id: str) -> dict:
+        SupabaseDB.update("documents", {"status": DocumentStatus.PROCESSING.value}, "id", document_id)
+        fut = _pool.submit(orchestrator.run_pipeline, document_id, organization_id)
+        def _log_err(f):
+            try:
+                exc = f.exception()
+                if exc:
+                    logger.error(f"Pipeline background failed for {document_id}: {exc}")
+            except:
+                pass
+        fut.add_done_callback(_log_err)
+        return {"document_id": document_id, "status": "processing", "message": "Pipeline started in background"}
+
+    async def process_document_await(self, document_id: str, organization_id: str) -> dict:
+        SupabaseDB.update("documents", {"status": DocumentStatus.PROCESSING.value}, "id", document_id)
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(_pool, orchestrator.run_pipeline, document_id, organization_id)
+        return result
+
+    def get_document(self, document_id: str, organization_id: str) -> dict:
+        result = SupabaseDB.select("documents", filters={"id": document_id, "organization_id": organization_id})
+        data = getattr(result, "data", result if isinstance(result, list) else [])
+        if isinstance(data, list) and len(data) > 0:
+            return data[0]
+        return data if isinstance(data, dict) else None
+
+    def list_documents(self, organization_id: str, limit: int = 50, offset: int = 0, search: str = "") -> list[dict]:
+        filters = {"organization_id": organization_id}
+        like = {"title": search} if search else None
+        result = SupabaseDB.select("documents", filters=filters, like=like, limit=limit, offset=offset)
+        data = getattr(result, "data", result if isinstance(result, list) else [])
+        return data if isinstance(data, list) else []
+
+    def delete_document(self, document_id: str, organization_id: str):
+        doc = self.get_document(document_id, organization_id)
+        if doc:
+            file_path = doc.get("original_file_url", "")
+            if file_path and os.path.exists(file_path):
+                try:
+                    os.remove(file_path)
+                except Exception:
+                    pass
+            supabase_url = doc.get("supabase_url") or ""
+            if supabase_url:
+                try:
+                    filename = supabase_url.rsplit("/", 1)[-1]
+                    SupabaseDB.delete_file("documents", filename)
+                except Exception:
+                    pass
+        SupabaseDB.delete("documents", "id", document_id)
+        try:
+            SupabaseDB.delete("document_chunks", "document_id", document_id)
+            SupabaseDB.delete("document_embeddings", "document_id", document_id)
+            SupabaseDB.delete("document_extractions", "document_id", document_id)
+            SupabaseDB.delete("documents_metadata", "document_id", document_id)
+            SupabaseDB.delete("processing_jobs", "document_id", document_id)
+            SupabaseDB.delete("agent_runs", "document_id", document_id)
+            SupabaseDB.delete("validation_results", "source_document_id", document_id)
+            SupabaseDB.delete("workflow_instances", "document_id", document_id)
+        except Exception:
+            pass
+        try:
+            from .pinecone_service import pinecone_service
+            pinecone_service.delete_by_document(document_id, namespace=organization_id)
+        except Exception:
+            pass
+        return {"message": "Document deleted successfully"}
+
+
+document_service = DocumentService()

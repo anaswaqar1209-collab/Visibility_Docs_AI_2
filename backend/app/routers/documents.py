@@ -1,0 +1,360 @@
+import os
+import asyncio
+import traceback
+import logging
+from uuid import uuid4
+from fastapi import APIRouter, UploadFile, File, Form, HTTPException, Body, Request, status
+from fastapi.responses import FileResponse, RedirectResponse
+from pydantic import BaseModel, Field
+from ..config import settings
+from ..database import SupabaseDB
+from ..models.schemas import UploadResponse, DocumentListResponse, ProcessResponse
+from ..services.document_service import document_service
+from ..utils.file_utils import save_upload_file, is_allowed_file
+
+logger = logging.getLogger("visibility-docs")
+
+router = APIRouter(prefix="/api/v1/documents", tags=["documents"])
+
+
+class ClassifyTextRequest(BaseModel):
+    text: str = Field(..., min_length=1, description="Document text to classify")
+    filename: str = Field("", description="Original filename")
+
+
+@router.post(
+    "/upload",
+    response_model=UploadResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Upload a document",
+    description="Upload PDF, image, DOCX, XLSX, or PPTX file for processing",
+)
+async def upload_document(
+    file: UploadFile = File(..., description="Document file (PDF, images, DOCX, XLSX, PPTX)"),
+    organization_id: str = Form(..., description="Tenant organization ID"),
+    title: str = Form(None, description="Optional document title"),
+):
+    print("\n" + "="*70)
+    print(f"[UPLOAD] Received file: {file.filename} for org: {organization_id}")
+    print("="*70)
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="No file provided")
+    if not is_allowed_file(file.filename):
+        print(f"[UPLOAD] REJECTED - unsupported type: {file.filename}")
+        raise HTTPException(
+            status_code=400,
+            detail=f"File type not supported: {file.filename}. Allowed: PDF, JPG, PNG, TIFF, DOCX, XLSX, PPTX",
+        )
+
+    doc_title = title or file.filename
+
+    try:
+        file_info = await save_upload_file(file)
+        print(f"[UPLOAD] File saved: {file_info.get('path', '?')} (hash: {file_info.get('file_hash', '?')[:16]}...)")
+    except Exception as e:
+        logger.error(f"Failed to save upload file: {e}\n{traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=f"Failed to save file: {str(e)}")
+
+    # Duplicate detection by file hash
+    file_hash = file_info.get("file_hash", "")
+    if file_hash:
+        existing = SupabaseDB.select("documents", filters={"organization_id": organization_id, "file_hash": file_hash})
+        existing_data = getattr(existing, "data", existing if isinstance(existing, list) else [])
+        if isinstance(existing_data, list) and existing_data:
+            dup = existing_data[0] if isinstance(existing_data[0], dict) else {}
+            print(f"[UPLOAD] DUPLICATE DETECTED - already uploaded as '{dup.get('title', 'unknown')}'")
+            raise HTTPException(
+                status_code=409,
+                detail=f"Duplicate file detected. Already uploaded as '{dup.get('title', 'unknown')}' (status: {dup.get('status', '?')})",
+            )
+
+    try:
+        doc = await document_service.create_document(
+            organization_id=organization_id,
+            title=doc_title,
+            file_info=file_info,
+        )
+        print(f"[UPLOAD] Document record created: ID={doc.get('id', '?')}")
+    except Exception as e:
+        logger.error(f"Failed to create document record: {e}\n{traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=f"Failed to create document record: {str(e)}")
+
+    doc_id = doc.get("id", uuid4().hex) if isinstance(doc, dict) else str(doc) if doc else ""
+
+    # Auto-start pipeline in background
+    try:
+        print(f"[UPLOAD] Auto-starting pipeline for document: {doc_id}")
+        asyncio.ensure_future(document_service.process_document(doc_id, organization_id))
+    except Exception as e:
+        logger.warning(f"Failed to auto-start pipeline: {e}")
+
+    return UploadResponse(
+        id=doc_id,
+        title=doc_title,
+        status="processing",
+        message="Document uploaded and processing started.",
+    )
+
+
+@router.post(
+    "/{document_id}/classify",
+    summary="Classify document (OCR + Groq)",
+    description="Run OCR and Groq classification. Returns type suggestion for user confirmation.",
+)
+async def classify_document(document_id: str, request: Request):
+    org_id = request.query_params.get("organization_id")
+    if not org_id:
+        try:
+            body = await request.json()
+            org_id = body.get("organization_id") if isinstance(body, dict) else None
+        except Exception:
+            pass
+    if not org_id:
+        raise HTTPException(status_code=400, detail="organization_id is required")
+
+    from ..services.orchestrator_service import orchestrator
+    loop = asyncio.get_event_loop()
+    result = await loop.run_in_executor(None, orchestrator.classify_only, document_id, org_id)
+    if "error" in result:
+        raise HTTPException(status_code=500, detail=result["error"])
+    return result
+
+
+@router.get(
+    "/{document_id}/file",
+    summary="Download/serve uploaded file",
+    description="Returns the original uploaded file for viewing or download",
+)
+async def get_document_file(document_id: str, organization_id: str = ""):
+    doc = document_service.get_document(document_id, organization_id)
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document not found")
+    file_path = doc.get("original_file_url", "")
+    if not file_path:
+        raise HTTPException(status_code=404, detail="File not found")
+    if file_path.startswith("http"):
+        return RedirectResponse(url=file_path)
+    if os.path.exists(file_path):
+        name = doc.get("title", "document")
+        return FileResponse(file_path, filename=name, media_type="application/octet-stream")
+    filename = os.path.basename(file_path) if file_path else doc.get("title", "document")
+    supabase_url = f"{settings.SUPABASE_URL}/storage/v1/object/public/documents/{filename}"
+    return RedirectResponse(url=supabase_url)
+
+
+@router.post(
+    "/{document_id}/process",
+    response_model=ProcessResponse,
+    summary="Process a document",
+    description="Run OCR, classification, entity extraction, and indexing on a document",
+)
+async def process_document(document_id: str, request: Request):
+    org_id = request.query_params.get("organization_id")
+    if not org_id:
+        try:
+            body = await request.json()
+            org_id = body.get("organization_id") if isinstance(body, dict) else None
+        except Exception:
+            pass
+    if not org_id:
+        raise HTTPException(status_code=400, detail="organization_id is required in query param or JSON body")
+
+    # Skip if already processed or processing
+    existing = document_service.get_document(document_id, org_id)
+    if existing:
+        if existing.get("status") in ("processed", "processing"):
+            return ProcessResponse(
+                document_id=document_id,
+                status=existing.get("status", "processing"),
+                classification={"document_type": existing.get("document_type", "unknown"), "confidence": 0},
+                extraction={"extracted_data": {}, "confidence": 0},
+            )
+
+    result = await document_service.process_document_await(document_id, org_id)
+
+    classification = result.get("classification")
+    extraction = result.get("extraction")
+
+    return ProcessResponse(
+        document_id=result.get("document_id", document_id),
+        status=result.get("status", "processing"),
+        classification=classification if isinstance(classification, dict) else None,
+        extraction=extraction if isinstance(extraction, dict) else None,
+    )
+
+
+@router.post(
+    "/check-duplicate",
+    summary="Check if document filename already exists",
+    description="Returns the existing document if filename already uploaded for this org",
+)
+async def check_duplicate(organization_id: str = Form(...), filename: str = Form(...)):
+    existing = document_service.list_documents(organization_id, search=filename)
+    for d in existing:
+        if d.get("title", "").lower() == filename.lower():
+            return {"duplicate": True, "document": d}
+    return {"duplicate": False, "document": None}
+
+
+@router.get(
+    "/{document_id}",
+    summary="Get document details",
+    description="Retrieve document metadata and status",
+)
+async def get_document(document_id: str, organization_id: str = ""):
+    doc = document_service.get_document(document_id, organization_id)
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document not found")
+    return doc
+
+
+class UpdateDocTypeRequest(BaseModel):
+    document_type: str = Field(..., description="New document type")
+    organization_id: str = Field(..., description="Tenant ID")
+
+
+@router.patch(
+    "/{document_id}",
+    summary="Update document metadata",
+    description="Update document fields like document_type",
+)
+async def update_document(document_id: str, body: UpdateDocTypeRequest):
+    from ..database import SupabaseDB
+    SupabaseDB.update("documents", {"document_type": body.document_type}, "id", document_id)
+    return {"id": document_id, "document_type": body.document_type, "status": "updated"}
+
+
+@router.get(
+    "",
+    response_model=DocumentListResponse,
+    summary="List documents",
+    description="List all documents for an organization. Use q to search by title.",
+)
+async def list_documents(organization_id: str = "", q: str = "", limit: int = 50, offset: int = 0):
+    docs = document_service.list_documents(organization_id, limit, offset, search=q)
+    return DocumentListResponse(documents=docs, total=len(docs))
+
+
+@router.get(
+    "/{document_id}/job",
+    summary="Get processing job status",
+    description="Get the current processing job stage and status for a document",
+)
+async def get_job_status(document_id: str, organization_id: str = ""):
+    from ..services.orchestrator_service import orchestrator
+    job = orchestrator.get_or_create_job(document_id, organization_id)
+    return job
+
+
+@router.post(
+    "/{document_id}/validate",
+    summary="Run cross-document validation",
+    description="Run all validations for this document against related documents",
+)
+async def validate_document(document_id: str, organization_id: str = ""):
+    if not organization_id:
+        raise HTTPException(status_code=400, detail="organization_id required")
+    from ..services.validation_service import validation_service
+    results = validation_service.run_all_validations(document_id, organization_id)
+    return {"document_id": document_id, "validation_results": results}
+
+
+@router.get(
+    "/{document_id}/workflow",
+    summary="Get workflow status",
+    description="Get workflow/approval status for a document",
+)
+async def get_workflow(document_id: str, organization_id: str = ""):
+    from ..services.workflow_service import workflow_service
+    wf = workflow_service.get_workflow_status(document_id, organization_id)
+    if not wf:
+        raise HTTPException(status_code=404, detail="No workflow found for this document")
+    return wf
+
+
+@router.post(
+    "/{document_id}/workflow/advance",
+    summary="Advance workflow stage",
+    description="Move the workflow to the next stage",
+)
+async def advance_workflow(document_id: str, organization_id: str = "", notes: str = ""):
+    from ..services.workflow_service import workflow_service
+    return workflow_service.advance_stage(document_id, organization_id, notes)
+
+
+@router.post(
+    "/{document_id}/workflow/approve",
+    summary="Approve document in workflow",
+    description="Approve the document at the current workflow stage",
+)
+async def approve_document(document_id: str, organization_id: str = "", approver: str = "", notes: str = ""):
+    from ..services.workflow_service import workflow_service
+    if not approver:
+        raise HTTPException(status_code=400, detail="approver name required")
+    return workflow_service.approve(document_id, organization_id, approver, notes)
+
+
+@router.post(
+    "/{document_id}/workflow/reject",
+    summary="Reject document in workflow",
+    description="Reject the document at the current workflow stage",
+)
+async def reject_document(document_id: str, organization_id: str = "", approver: str = "", reason: str = ""):
+    from ..services.workflow_service import workflow_service
+    if not approver or not reason:
+        raise HTTPException(status_code=400, detail="approver and reason required")
+    return workflow_service.reject(document_id, organization_id, approver, reason)
+
+
+@router.get(
+    "/validations/list",
+    summary="List validation results",
+    description="Get all validation results for an organization",
+)
+async def list_validations(organization_id: str = "", document_id: str = "", limit: int = 50):
+    from ..database import SupabaseDB
+    filters = {}
+    if organization_id:
+        filters["organization_id"] = organization_id
+    if document_id:
+        filters["source_document_id"] = document_id
+    result = SupabaseDB.select("validation_results", filters=filters)
+    data = getattr(result, "data", [])
+    if not isinstance(data, list):
+        data = []
+    return {"validations": data[:limit], "total": len(data)}
+
+
+@router.get(
+    "/workflows/pending",
+    summary="List pending approvals",
+    description="Get all documents pending approval in workflows",
+)
+async def list_pending_approvals(organization_id: str = "", assigned_to: str = ""):
+    from ..services.workflow_service import workflow_service
+    pending = workflow_service.list_pending_approvals(organization_id, assigned_to or None)
+    return {"pending_approvals": pending, "total": len(pending)}
+
+
+@router.delete(
+    "/{document_id}",
+    status_code=status.HTTP_200_OK,
+    summary="Delete a document",
+    description="Delete document and all associated data",
+)
+async def delete_document(document_id: str, organization_id: str = ""):
+    return document_service.delete_document(document_id, organization_id)
+
+
+@router.post(
+    "/classify-text",
+    summary="Classify document text",
+    description="Classify document text into invoice, contract, PO, etc. using Groq AI",
+)
+async def classify_text(request: ClassifyTextRequest = Body(...)):
+    from ..services.classification_service import classification_service
+    result = classification_service.classify(request.text, request.filename)
+    return result
+
+
+
