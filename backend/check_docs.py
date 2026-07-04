@@ -14,3 +14,6 @@ try:
     print("All docs:", r.data)
 except Exception as e:
     print("Select error:", e)
+
+
+    
