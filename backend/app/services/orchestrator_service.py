@@ -286,59 +286,46 @@ class OrchestratorService:
             except Exception as e:
                 print(f"[PIPELINE] Table extraction skipped: {e}")
 
-            if doc_type == "other":
-                # Skip Groq extraction for 'other' type — no structured fields expected
-                extraction = {"extracted_data": {}, "confidence": 0.0}
-                print(f"[PIPELINE] Skipping extraction for document type 'other'")
-                self.update_stage(document_id, organization_id, "extracted", 80)
-                print(f"[PIPELINE] Indexing document (embedding)...")
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+                print(f"[PIPELINE] Submitting extraction (agent: {classification.get('agent_type','')}) + embedding in parallel...")
+                ext_future = pool.submit(category_agents.extract, raw_text, doc_type, classification.get("agent_type", ""))
+                emb_future = pool.submit(rag_service.index_document, document_id, organization_id, raw_text, file_path)
+
+                t0 = time.time()
+                extraction = ext_future.result()
+                ext_duration = int((time.time() - t0) * 1000)
+                print(f"[PIPELINE] Extraction complete: fields={list(extraction.get('extracted_data', {}).keys())[:5]}, conf={extraction.get('confidence', 0):.2f}, time={ext_duration}ms")
+                self.log_agent_run(organization_id, document_id, f"{doc_type}_agent",
+                                   f"type={doc_type}, text_len={len(raw_text)}",
+                                   f"fields={list(extraction.get('extracted_data', {}).keys())[:10]}",
+                                   extraction.get("confidence", 0), ext_duration)
+
                 try:
-                    rag_service.index_document(document_id, organization_id, raw_text, file_path=file_path)
+                    emb_future.result()
                     print(f"[PIPELINE] Embedding complete")
                 except Exception as e:
-                    logger.warning(f"Embedding skipped for {document_id}: {e}")
-                    print(f"[PIPELINE] Embedding skipped: {e}")
-            else:
-                import concurrent.futures
-                with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
-                    print(f"[PIPELINE] Submitting extraction (agent: {classification.get('agent_type','')}) + embedding in parallel...")
-                    ext_future = pool.submit(category_agents.extract, raw_text, doc_type, classification.get("agent_type", ""))
-                    emb_future = pool.submit(rag_service.index_document, document_id, organization_id, raw_text, file_path)
+                    logger.warning(f"Embedding failed in parallel: {e}")
+                    print(f"[PIPELINE] Embedding FAILED: {e}")
 
-                    t0 = time.time()
-                    extraction = ext_future.result()
-                    ext_duration = int((time.time() - t0) * 1000)
-                    print(f"[PIPELINE] Extraction complete: fields={list(extraction.get('extracted_data', {}).keys())[:5]}, conf={extraction.get('confidence', 0):.2f}, time={ext_duration}ms")
-                    self.log_agent_run(organization_id, document_id, f"{doc_type}_agent",
-                                       f"type={doc_type}, text_len={len(raw_text)}",
-                                       f"fields={list(extraction.get('extracted_data', {}).keys())[:10]}",
-                                       extraction.get("confidence", 0), ext_duration)
-
-                    try:
-                        emb_future.result()
-                        print(f"[PIPELINE] Embedding complete")
-                    except Exception as e:
-                        logger.warning(f"Embedding failed in parallel: {e}")
-                        print(f"[PIPELINE] Embedding FAILED: {e}")
-
-                SupabaseDB.insert("documents_metadata", {
-                    "organization_id": organization_id,
-                    "document_id": document_id,
-                    "document_type": doc_type,
-                    "extracted_data": extraction.get("extracted_data", {}),
-                    "field_confidence": extraction.get("field_confidence", {}),
-                    "overall_confidence": extraction.get("confidence", 0),
-                    "agent_version": "1.0.0",
-                })
-                SupabaseDB.insert("document_extractions", {
-                    "organization_id": organization_id,
-                    "document_id": document_id,
-                    "extraction_type": doc_type,
-                    "extracted_data": extraction.get("extracted_data", {}),
-                    "confidence": extraction.get("confidence", 0),
-                })
-                self.update_stage(document_id, organization_id, "extracted", 80)
-                print(f"[PIPELINE] Extraction data saved to DB")
+            SupabaseDB.insert("documents_metadata", {
+                "organization_id": organization_id,
+                "document_id": document_id,
+                "document_type": doc_type,
+                "extracted_data": extraction.get("extracted_data", {}),
+                "field_confidence": extraction.get("field_confidence", {}),
+                "overall_confidence": extraction.get("confidence", 0),
+                "agent_version": "1.0.0",
+            })
+            SupabaseDB.insert("document_extractions", {
+                "organization_id": organization_id,
+                "document_id": document_id,
+                "extraction_type": doc_type,
+                "extracted_data": extraction.get("extracted_data", {}),
+                "confidence": extraction.get("confidence", 0),
+            })
+            self.update_stage(document_id, organization_id, "extracted", 80)
+            print(f"[PIPELINE] Extraction data saved to DB")
 
             self.update_stage(document_id, organization_id, "embedded", 95)
 
