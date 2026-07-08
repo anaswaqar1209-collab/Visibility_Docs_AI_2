@@ -66,6 +66,7 @@ def _init_local_db(conn):
             chunk_type TEXT DEFAULT 'paragraph',
             heading TEXT,
             content TEXT NOT NULL,
+            chunk_text TEXT,
             metadata TEXT,
             created_at TEXT DEFAULT (datetime('now'))
         );
@@ -190,6 +191,10 @@ def _init_local_db(conn):
                 content, document_id UNINDEXED, organization_id UNINDEXED, page_id UNINDEXED
             );
         """)
+    except Exception:
+        pass
+    try:
+        conn.execute("ALTER TABLE document_chunks ADD COLUMN chunk_text TEXT")
     except Exception:
         pass
 
@@ -487,9 +492,10 @@ def _local_insert(table: str, data: dict):
         conn.commit()
         return type("Result", (), {"data": [dict(conn.execute("SELECT * FROM documents WHERE id=?", (data["id"],)).fetchone())]})()
     if table == "document_chunks":
-        cur = conn.execute("INSERT INTO document_chunks (organization_id, document_id, page_id, chunk_type, heading, content, metadata) VALUES (?,?,?,?,?,?,?)",
+        cur = conn.execute("INSERT INTO document_chunks (organization_id, document_id, page_id, chunk_type, heading, content, chunk_text, metadata) VALUES (?,?,?,?,?,?,?,?)",
                            (data.get("organization_id", ""), data.get("document_id", ""), data.get("page_id"), data.get("chunk_type", "paragraph"),
-                            data.get("heading"), data.get("content", ""), __import__("json").dumps(data.get("metadata")) if data.get("metadata") else None))
+                            data.get("heading"), data.get("content", ""), data.get("chunk_text") or data.get("content", ""),
+                            __import__("json").dumps(data.get("metadata")) if data.get("metadata") else None))
         conn.commit()
         chunk_id = cur.lastrowid
         _local_fts_sync(data.get("document_id"))
@@ -591,10 +597,11 @@ def _local_batch_insert(table: str, records: list[dict]):
     if table == "document_chunks":
         doc_ids = set()
         conn.executemany(
-            "INSERT INTO document_chunks (organization_id, document_id, page_id, chunk_type, heading, content, chunk_index, metadata) VALUES (?,?,?,?,?,?,?,?)",
+            "INSERT INTO document_chunks (organization_id, document_id, page_id, chunk_type, heading, content, chunk_text, chunk_index, metadata) VALUES (?,?,?,?,?,?,?,?,?)",
             [(r.get("organization_id", ""), r.get("document_id", ""), r.get("page_id"),
               r.get("chunk_type", "paragraph"), r.get("heading"),
-              r.get("content", ""), r.get("chunk_index", 0), __import__("json").dumps(r.get("metadata")) if r.get("metadata") else None) for r in records])
+              r.get("content", ""), r.get("chunk_text") or r.get("content", ""),
+              r.get("chunk_index", 0), __import__("json").dumps(r.get("metadata")) if r.get("metadata") else None) for r in records])
         for r in records:
             if r.get("document_id"):
                 doc_ids.add(r["document_id"])
@@ -633,14 +640,17 @@ def _local_fts_sync(document_id: str = None):
     try:
         if document_id:
             conn.execute("DELETE FROM chunks_fts WHERE document_id=?", (document_id,))
-            rows = conn.execute("SELECT id, content, document_id, organization_id, page_id FROM document_chunks WHERE document_id=?", (document_id,)).fetchall()
+            rows = conn.execute("SELECT id, content, chunk_text, document_id, organization_id, page_id FROM document_chunks WHERE document_id=?", (document_id,)).fetchall()
         else:
             conn.execute("DELETE FROM chunks_fts")
-            rows = conn.execute("SELECT id, content, document_id, organization_id, page_id FROM document_chunks").fetchall()
+            rows = conn.execute("SELECT id, content, chunk_text, document_id, organization_id, page_id FROM document_chunks").fetchall()
         for r in rows:
             try:
+                fts_content = r["content"]
+                if r.get("chunk_text"):
+                    fts_content = r["chunk_text"]
                 conn.execute("INSERT INTO chunks_fts (rowid, content, document_id, organization_id, page_id) VALUES (?, ?, ?, ?, ?)",
-                             (r["id"], r["content"], r["document_id"], r["organization_id"], r["page_id"]))
+                             (r["id"], fts_content, r["document_id"], r["organization_id"], r["page_id"]))
             except Exception:
                 pass
         conn.commit()

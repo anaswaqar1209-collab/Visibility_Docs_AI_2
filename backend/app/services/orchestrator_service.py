@@ -293,7 +293,7 @@ class OrchestratorService:
                 self.update_stage(document_id, organization_id, "extracted", 80)
                 print(f"[PIPELINE] Indexing document (embedding)...")
                 try:
-                    rag_service.index_document(document_id, organization_id, raw_text)
+                    rag_service.index_document(document_id, organization_id, raw_text, file_path=file_path)
                     print(f"[PIPELINE] Embedding complete")
                 except Exception as e:
                     logger.warning(f"Embedding skipped for {document_id}: {e}")
@@ -303,7 +303,7 @@ class OrchestratorService:
                 with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
                     print(f"[PIPELINE] Submitting extraction (agent: {classification.get('agent_type','')}) + embedding in parallel...")
                     ext_future = pool.submit(category_agents.extract, raw_text, doc_type, classification.get("agent_type", ""))
-                    emb_future = pool.submit(rag_service.index_document, document_id, organization_id, raw_text)
+                    emb_future = pool.submit(rag_service.index_document, document_id, organization_id, raw_text, file_path)
 
                     t0 = time.time()
                     extraction = ext_future.result()

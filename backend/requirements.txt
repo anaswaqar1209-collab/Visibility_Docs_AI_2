@@ -17,7 +17,6 @@ Pillow==11.0.0
 
 # Table Extraction
 pdfplumber==0.11.4
-camelot-py[cv]==2.0.0
 
 # OCR & Document Processing
 pymupdf==1.24.14

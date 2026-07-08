@@ -5,6 +5,252 @@ from .embedding_service import embedding_service
 from .pinecone_service import pinecone_service
 
 
+_NUMERED_RE = None
+_CHAPTER_RE = None
+
+
+def _get_patterns():
+    global _NUMERED_RE, _CHAPTER_RE
+    if _NUMERED_RE is None:
+        import re
+        _NUMERED_RE = re.compile(r'^\d+(?:\.\d+)*(?:\s+|\.\s+)(.+)')
+        _CHAPTER_RE = re.compile(r'^(?:chapter|section|appendix|part|article)\s+\d+', re.IGNORECASE)
+    return _NUMERED_RE, _CHAPTER_RE
+
+
+def _detect_headings_from_file(file_path: str) -> list[dict]:
+    import fitz
+    numbered_re, chapter_re = _get_patterns()
+
+    doc = fitz.open(file_path)
+    page_height = doc[0].rect.height if doc.page_count > 0 else 842
+    headings = []
+    for page_num in range(doc.page_count):
+        page = doc[page_num]
+        blocks = page.get_text("dict").get("blocks", [])
+        font_sizes = []
+        spans_data = []
+        for block in blocks:
+            if block.get("type") != 0:
+                continue
+            for line in block.get("lines", []):
+                for span in line.get("spans", []):
+                    txt = span.get("text", "").strip()
+                    if txt:
+                        font_sizes.append(span.get("size", 0))
+                        spans_data.append({
+                            "text": txt,
+                            "size": span.get("size", 0),
+                            "flags": span.get("flags", 0),
+                            "font": span.get("font", ""),
+                            "bbox": line.get("bbox", [0, 0, 0, 0]),
+                        })
+        if not font_sizes:
+            continue
+        font_sizes.sort()
+        body_size = font_sizes[len(font_sizes) // 2]
+
+        for sp in spans_data:
+            txt = sp["text"]
+            if len(txt) < 2 or len(txt) > 150:
+                continue
+            if txt.isdigit():
+                continue
+            size = sp["size"]
+            flags = sp["flags"]
+            font = sp["font"]
+            is_bold = bool(flags & 16) or "bold" in font.lower()
+            y0 = sp["bbox"][1]
+            if y0 < page_height * 0.06 or y0 > page_height * 0.94:
+                continue
+
+            is_heading = False
+            level = 0
+            if size > body_size * 1.15:
+                is_heading = True
+                level = 1 if size > body_size * 1.4 else 2
+            elif is_bold and len(txt) < 100 and size >= body_size * 0.9:
+                is_heading = True
+                level = 3
+            m = numbered_re.match(txt)
+            if m:
+                is_heading = True
+                level = min(level, 3) if level else 3
+            if chapter_re.match(txt):
+                is_heading = True
+                level = 1
+            if txt.isupper() and len(txt) > 3 and len(txt) < 60 and not is_bold:
+                is_heading = True
+                level = min(level, 2) if level else 2
+
+            if is_heading:
+                headings.append({
+                    "heading": txt,
+                    "page": page_num + 1,
+                    "level": level,
+                    "y0": y0,
+                })
+    doc.close()
+
+    headings.sort(key=lambda h: (h["page"], h["y0"]))
+    collapsed = []
+    for h in headings:
+        if collapsed and collapsed[-1]["heading"] == h["heading"] and collapsed[-1]["page"] == h["page"]:
+            continue
+        collapsed.append(h)
+
+    page1_top = [h for h in collapsed if h["page"] == 1 and h["y0"] < page_height * 0.15]
+    if len(page1_top) >= 3:
+        page1_top_set = {h["heading"] for h in page1_top}
+        collapsed = [h for h in collapsed if h["heading"] not in page1_top_set or h["page"] != 1]
+
+    collapsed = [h for h in collapsed if not (h["level"] == 3 and len(h["heading"].split()) == 1)]
+
+    return collapsed
+
+
+def _detect_headings_from_text(text: str) -> list[dict]:
+    numbered_re, chapter_re = _get_patterns()
+    headings = []
+    lines = text.split("\n")
+    body_sizes = [len(l.split()) for l in lines if l.strip()]
+    avg_line_words = sum(body_sizes) / max(len(body_sizes), 1) if body_sizes else 10
+
+    for idx, line in enumerate(lines):
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if numbered_re.match(stripped):
+            prev_line = lines[idx - 1].strip() if idx > 0 else ""
+            if prev_line and len(prev_line) > 3 and not numbered_re.match(prev_line):
+                headings.append({"heading": stripped, "level": 3})
+        elif chapter_re.match(stripped):
+            headings.append({"heading": stripped, "level": 1})
+        elif stripped.isupper() and len(stripped) > 3 and len(stripped) < 80:
+            word_count = len(stripped.split())
+            if word_count < avg_line_words * 0.7:
+                headings.append({"heading": stripped, "level": 2})
+
+    return headings
+
+
+def _merge_headings(text_headings: list[dict], pdf_headings: list[dict]) -> list[dict]:
+    seen = set()
+    merged = []
+    for h in pdf_headings + text_headings:
+        key = h.get("heading", "").strip().lower()
+        if key and key not in seen:
+            seen.add(key)
+            merged.append(h)
+    return merged
+
+
+def _build_sections(text: str, headings: list[dict]) -> list[dict]:
+    if not headings:
+        return []
+    raw_sections = []
+    search_pos = 0
+    for i, h in enumerate(headings):
+        start_text = h["heading"]
+        start_idx = text.find(start_text, search_pos)
+        if start_idx < 0:
+            continue
+        end_idx = len(text)
+        if i + 1 < len(headings):
+            next_text = headings[i + 1]["heading"]
+            nxt = text.find(next_text, start_idx + len(start_text))
+            if nxt > start_idx:
+                end_idx = nxt
+        section_text = text[start_idx:end_idx].strip()
+        if section_text:
+            raw_sections.append({
+                "heading": h["heading"],
+                "content": section_text,
+                "level": h.get("level", 3),
+            })
+            search_pos = end_idx
+    if not raw_sections:
+        return []
+
+    merged = []
+    buffer = None
+    for sec in raw_sections:
+        content_words = len(sec["content"].split())
+        is_tiny = content_words < 30 and sec["level"] >= 2
+        if is_tiny:
+            if buffer is None:
+                buffer = sec
+            else:
+                buffer["content"] += "\n" + sec["content"]
+        else:
+            if buffer:
+                merged.append(buffer)
+                buffer = None
+            merged.append(sec)
+    if buffer:
+        if merged:
+            merged[-1]["content"] += "\n" + buffer["content"]
+        else:
+            merged.append(buffer)
+    return merged
+
+
+def _chunk_by_sections(text: str, headings: list[dict], max_words: int = 350) -> list[dict]:
+    sections = _build_sections(text, headings)
+    if not sections:
+        return []
+
+    chunks = []
+    import re
+    for sec in sections:
+        content = sec["content"]
+        words = content.split()
+        if len(words) <= max_words:
+            cid = hashlib.md5(content.encode()).hexdigest()
+            chunks.append({
+                "content": content,
+                "chunk_id": cid,
+                "chunk_index": len(chunks),
+                "word_count": len(words),
+                "heading": sec["heading"],
+                "chunk_type": "section",
+            })
+        else:
+            sentences = re.split(r'(?<=[.!?])\s+', content)
+            current = []
+            current_words = 0
+            for sent in sentences:
+                sw = len(sent.split())
+                if current_words + sw > max_words and current:
+                    chunk_text = " ".join(current)
+                    cid = hashlib.md5(chunk_text.encode()).hexdigest()
+                    chunks.append({
+                        "content": chunk_text,
+                        "chunk_id": cid,
+                        "chunk_index": len(chunks),
+                        "word_count": current_words,
+                        "heading": sec["heading"],
+                        "chunk_type": "section",
+                    })
+                    current = [sent]
+                    current_words = sw
+                else:
+                    current.append(sent)
+                    current_words += sw
+            if current:
+                chunk_text = " ".join(current)
+                cid = hashlib.md5(chunk_text.encode()).hexdigest()
+                chunks.append({
+                    "content": chunk_text,
+                    "chunk_id": cid,
+                    "chunk_index": len(chunks),
+                    "word_count": current_words,
+                    "heading": sec["heading"],
+                    "chunk_type": "section",
+                })
+    return chunks
+
+
 class RAGService:
     def chunk_text(self, text: str, max_words: int = 250) -> list[dict]:
         if not text:
@@ -67,9 +313,33 @@ class RAGService:
 
         return chunks
 
-    def index_document(self, document_id: str, organization_id: str, text: str, page_number: int = None):
+    def index_document(self, document_id: str, organization_id: str, text: str, file_path: str = None, page_number: int = None):
         print(f"\n[INDEX] Indexing document {document_id[:12] if document_id else '?'}... ({len(text)} chars)")
-        chunks = self.chunk_text(text)
+
+        headings = []
+        if file_path:
+            try:
+                headings = _detect_headings_from_file(file_path)
+                if headings:
+                    print(f"[INDEX] PyMuPDF detected {len(headings)} headings")
+            except Exception as e:
+                print(f"[INDEX] PyMuPDF heading detection failed: {e}")
+        text_headings = _detect_headings_from_text(text)
+        if text_headings:
+            print(f"[INDEX] Text regex detected {len(text_headings)} heading patterns")
+        headings = _merge_headings(text_headings, headings)
+
+        if headings:
+            chunks = _chunk_by_sections(text, headings)
+            if chunks:
+                print(f"[INDEX] Topic-wise chunking: {len(chunks)} chunks from {len(headings)} headings")
+            else:
+                chunks = self.chunk_text(text)
+                print(f"[INDEX] Section building produced empty chunks, falling back to word-count chunking")
+        else:
+            chunks = self.chunk_text(text)
+            print(f"[INDEX] No headings detected, using word-count chunking ({len(chunks)} chunks)")
+
         if not chunks:
             print(f"[INDEX] No chunks generated")
             return
@@ -86,14 +356,21 @@ class RAGService:
             chunk_records = []
             emb_records = []
             for chunk, embedding in zip(chunks, embeddings):
+                heading = chunk.get("heading")
+                ctype = chunk.get("chunk_type", "paragraph")
+                meta = {"chunk_index": chunk.get("chunk_index", 0), "word_count": chunk.get("word_count", 0)}
+                if heading:
+                    meta["heading"] = heading
                 chunk_records.append({
                     "organization_id": organization_id,
                     "document_id": document_id,
                     "page_id": page_number,
-                    "chunk_index": chunk["chunk_index"],
-                    "chunk_type": "paragraph",
+                    "chunk_index": chunk.get("chunk_index", 0),
+                    "chunk_type": ctype,
+                    "heading": heading,
                     "content": chunk["content"],
-                    "metadata": {"chunk_index": chunk["chunk_index"], "word_count": chunk["word_count"]},
+                    "chunk_text": chunk["content"],
+                    "metadata": meta,
                 })
                 emb_records.append({
                     "organization_id": organization_id,
@@ -205,7 +482,6 @@ class RAGService:
         except Exception:
             pass
 
-        # LIKE fallback if FTS5 returned nothing
         if not results:
             try:
                 like_results = SupabaseDB.select(
@@ -303,7 +579,6 @@ class RAGService:
 
 
     def _get_first_embedding(self, document_id: str, organization_id: str) -> list[float] | None:
-        """Fetch first embedding for a document from Supabase/local (legacy storage)."""
         try:
             result = SupabaseDB.select("document_embeddings", filters={"document_id": document_id, "organization_id": organization_id})
             data = getattr(result, "data", [])

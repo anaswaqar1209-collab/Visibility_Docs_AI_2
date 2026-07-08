@@ -7,10 +7,39 @@ module.exports = {
   ],
   theme: {
     extend: {
-      colors: {
-        primary: { 50: "#eff6ff", 100: "#dbeafe", 200: "#bfdbfe", 300: "#93c5fd", 400: "#60a5fa", 500: "#3b82f6", 600: "#2563eb", 700: "#1d4ed8", 800: "#1e40af", 900: "#1e3a8a" },
+      fontFamily: {
+        sans: ['Inter', 'system-ui', '-apple-system', 'sans-serif'],
       },
     },
   },
-  plugins: [],
+  plugins: [require("daisyui")],
+  daisyui: {
+    themes: [
+      {
+        visibility: {
+          "primary": "#6366f1",
+          "primary-content": "#ffffff",
+          "secondary": "#0d9488",
+          "accent": "#f59e0b",
+          "neutral": "#1e293b",
+          "neutral-content": "#f8fafc",
+          "base-100": "#ffffff",
+          "base-200": "#f1f5f9",
+          "base-300": "#e2e8f0",
+          "base-content": "#0f172a",
+          "info": "#3b82f6",
+          "success": "#10b981",
+          "warning": "#f59e0b",
+          "error": "#ef4444",
+          "--rounded-box": "1rem",
+          "--rounded-btn": "0.75rem",
+          "--rounded-badge": "2rem",
+          "--animation-btn": "0.25s",
+          "--animation-input": "0.2s",
+          "--btn-focus-scale": "0.95",
+          "--tab-radius": "0.5rem",
+        },
+      },
+    ],
+  },
 };

@@ -21,8 +21,16 @@ def get_file_hash(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+import re
+
 def generate_unique_filename(original: str) -> str:
-    return original
+    # Remove null bytes and control chars, replace Windows-invalid chars with _
+    safe = re.sub(r'[\x00-\x1f<>:"/\\|?*]', '_', original)
+    safe = safe.strip().strip('.')
+    safe = safe[:200]
+    if not safe:
+        safe = f"file_{uuid.uuid4().hex[:8]}"
+    return safe
 
 
 async def save_upload_file(upload_file: UploadFile, upload_dir: str = None) -> dict:

@@ -4,15 +4,20 @@ from ..database import SupabaseDB
 
 
 class ChatService:
-    def _get_or_create_session(self, session_id: str, organization_id: str, document_ids: list = None) -> tuple[str, list]:
+    def _get_or_create_session(self, session_id: str, organization_id: str, document_ids: list = None) -> tuple[str, list, bool]:
+        is_first = True
         if session_id:
             existing = SupabaseDB.get_chat_session(session_id)
             if existing:
                 stored_ids = existing.get("document_ids") or []
-                return session_id, stored_ids
+                messages = existing.get("messages") or []
+                is_first = len(messages) == 0
+                if messages:
+                    conversation_service.load_history_from_db(session_id, messages)
+                return session_id, stored_ids, is_first
         doc_list = document_ids or []
         new_id = SupabaseDB.create_chat_session(organization_id, "New Chat", doc_list)
-        return new_id, doc_list
+        return new_id, doc_list, True
 
     def _auto_title(self, session_id: str, first_question: str):
         title = first_question[:80].strip()
@@ -28,9 +33,7 @@ class ChatService:
 
     def chat_with_document(self, question: str, document_ids: list, organization_id: str,
                            chat_history: list[dict] = None, session_id: str = None) -> dict:
-        sid, resolved_ids = self._get_or_create_session(session_id, organization_id, document_ids)
-        existing = SupabaseDB.get_chat_session(sid)
-        is_first = not bool(existing.get("messages")) if existing else True
+        sid, resolved_ids, is_first = self._get_or_create_session(session_id, organization_id, document_ids)
 
         if resolved_ids:
             search_results = rag_service.hybrid_search(question, organization_id, document_ids=resolved_ids, limit=5)
@@ -38,8 +41,11 @@ class ChatService:
             search_results = rag_service.hybrid_search(question, organization_id, limit=5)
 
         if not search_results:
-            answer = "I could not find any relevant information in the selected documents."
-            conversation_service.chat(question, "", session_id=sid)
+            if is_first:
+                answer = "I could not find any relevant information in the selected documents."
+                conversation_service.chat(question, "", session_id=sid)
+            else:
+                answer = conversation_service.chat(question, "", session_id=sid, is_followup=True)
             self._save_exchange(sid, question, answer, [], is_first)
             return {
                 "answer": answer,
@@ -62,7 +68,7 @@ class ChatService:
 
         context = "\n\n".join(context_parts)
 
-        answer = conversation_service.chat(question, context, session_id=sid)
+        answer = conversation_service.chat(question, context, session_id=sid, is_followup=not is_first)
         history = conversation_service.get_history(sid)
         self._save_exchange(sid, question, answer, sources[:5], is_first)
 

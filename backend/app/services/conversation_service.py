@@ -30,6 +30,7 @@ class ConversationService:
         ) if api_key and api_key != "gsk_your_groq_api_key" else None
         self._chain = None
         self._chain_with_history = None
+        self._last_context: dict[str, str] = {}
         self._setup_chain()
 
     def _setup_chain(self):
@@ -53,15 +54,42 @@ class ConversationService:
             history_messages_key="history",
         )
 
-    def chat(self, question: str, context: str, session_id: str = None) -> str:
+    def load_history_from_db(self, session_id: str, messages: list[dict]):
+        """Seed in-memory history from DB messages for this session."""
+        sid = session_id or "default"
+        history = get_session_history(sid)
+        if history.messages:
+            return
+        for msg in messages:
+            role = msg.get("role")
+            content = msg.get("content", "")
+            if role == "user":
+                history.add_user_message(content)
+            elif role == "assistant":
+                history.add_ai_message(content)
+
+    def set_last_context(self, session_id: str, context: str):
+        if session_id:
+            self._last_context[session_id] = context
+
+    def get_last_context(self, session_id: str) -> str:
+        return self._last_context.get(session_id, "")
+
+    def chat(self, question: str, context: str, session_id: str = None, is_followup: bool = False) -> str:
         if not self._chain_with_history:
             return "Groq API is not configured."
 
         config = {"configurable": {"session_id": session_id or "default"}} if session_id else \
                  {"configurable": {"session_id": "default"}}
 
+        if is_followup and not context:
+            context = self.get_last_context(session_id)
+
+        if context:
+            self.set_last_context(session_id, context)
+
         response = self._chain_with_history.invoke(
-            {"context": context, "question": question, "history": []},
+            {"context": context, "question": question},
             config=config,
         )
         return response.content

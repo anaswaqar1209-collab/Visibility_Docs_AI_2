@@ -1,780 +1,749 @@
 "use client";
+import { useState, useRef, useEffect, useCallback } from "react";
 
-import { useState, useRef, useCallback, useEffect } from "react";
+const API = "http://127.0.0.1:8000";
+const ORG = "default-org";
 
-async function safeJson(res: Response) {
-  try {
-    const text = await res.text();
-    return JSON.parse(text);
-  } catch {
-    let txt = "";
-    try { txt = (await res.text()) || ""; } catch {}
-    return { detail: txt ? txt.substring(0, 300) : `HTTP ${res.status}` };
-  }
+/* ───────────── helpers ───────────── */
+
+function timeAgo(d: string) {
+  const s = Math.floor((Date.now() - new Date(d).getTime()) / 1000);
+  if (s < 60) return "just now";
+  if (s < 3600) return `${Math.floor(s / 60)}m ago`;
+  if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
+  return `${Math.floor(s / 86400)}d ago`;
 }
 
-const ORG = "default-org";
-const API = "http://127.0.0.1:8000";
+function statusColor(s: string) {
+  const m: Record<string, string> = {
+    processed: "badge-success", processing: "badge-info",
+    failed: "badge-error", uploaded: "badge-ghost",
+    classified: "badge-primary", ocr_done: "badge-warning",
+    embedded: "badge-accent", extracting: "badge-warning",
+    queued: "badge-ghost",
+  };
+  return m[s] || "badge-ghost";
+}
 
+function typeColor(t: string) {
+  const m: Record<string, string> = {
+    invoice: "badge-secondary", contract: "badge-primary",
+    report: "badge-accent", resume: "badge-info",
+    other: "badge-ghost",
+  };
+  return m[t] || "badge-ghost";
+}
+
+const NavItem = ({ icon, label, active, onClick }: any) => (
+  <button onClick={onClick}
+    className={`flex items-center gap-3 w-full px-4 py-3 rounded-xl transition-all duration-200
+      ${active ? "bg-white/10 text-white shadow-sm" : "text-white/60 hover:text-white hover:bg-white/5"}`}>
+    <span className="text-lg">{icon}</span>
+    <span className="font-medium text-sm">{label}</span>
+  </button>
+);
+
+const TypingDots = () => (
+  <div className="flex gap-1.5 items-center px-1">
+    {[1, 2, 3].map(i => <span key={i} className="w-2 h-2 rounded-full bg-indigo-400 bounce-dot" />)}
+  </div>
+);
+
+/* ───────────── main page ───────────── */
 export default function Home() {
-  const [msg, setMsg] = useState("");
-  const [msgType, setMsgType] = useState<"info"|"error"|"success">("info");
-  const pushMsg = (m: string, type: "info"|"error"|"success" = "info") => { setMsg(m); setMsgType(type); setTimeout(() => setMsg(""), 5000); };
-  const [sidebar, setSidebar] = useState<"docs"|"workflow"|"validations">("docs");
-  const [classPopup, setClassPopup] = useState<{name:string;type:string;conf:number} | null>(null);
+  const [tab, setTab] = useState<"chat" | "docs">("chat");
+  const [toast, setToast] = useState("");
+
+  const showToast = useCallback((m: string) => { setToast(m); setTimeout(() => setToast(""), 3000); }, []);
 
   return (
-    <div className="h-screen flex flex-col bg-gray-50">
-      <header className="bg-white border-b border-gray-200 px-6 py-3 flex items-center justify-between shrink-0">
-        <div className="flex items-center gap-3">
-          <div className="w-8 h-8 bg-blue-600 rounded-lg flex items-center justify-center text-white font-bold text-sm">V</div>
-          <div>
-            <h1 className="text-lg font-bold text-gray-900 leading-tight">Visibility Docs AI</h1>
-            <p className="text-xs text-gray-400">Enterprise Document Intelligence</p>
+    <div className="h-screen flex flex-col bg-gradient-surface">
+      {/* ── header ── */}
+      <header className="shrink-0 glass border-b border-slate-200/50 z-30">
+        <div className="flex items-center justify-between px-6 py-3">
+          <div className="flex items-center gap-3">
+            <div className="w-10 h-10 rounded-xl gradient-primary flex items-center justify-center shadow-lg shadow-indigo-500/20">
+              <svg className="w-5 h-5 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+              </svg>
+            </div>
+            <div>
+              <h1 className="text-xl font-bold text-gradient tracking-tight">Visibility Docs AI</h1>
+              <p className="text-[11px] text-slate-400 -mt-0.5">Enterprise Document Intelligence</p>
+            </div>
+          </div>
+          <div className="flex items-center gap-4">
+            <div className="flex gap-1 p-1 bg-slate-100/80 rounded-xl">
+              <button onClick={() => setTab("chat")}
+                className={`px-4 py-2 rounded-lg text-sm font-medium transition-all duration-200
+                  ${tab === "chat" ? "bg-white text-indigo-600 shadow-sm" : "text-slate-500 hover:text-slate-700"}`}>
+                💬 Chat
+              </button>
+              <button onClick={() => setTab("docs")}
+                className={`px-4 py-2 rounded-lg text-sm font-medium transition-all duration-200
+                  ${tab === "docs" ? "bg-white text-indigo-600 shadow-sm" : "text-slate-500 hover:text-slate-700"}`}>
+                📄 Documents
+              </button>
+            </div>
           </div>
         </div>
-        <nav className="flex gap-1 bg-gray-100 rounded-lg p-0.5">
-          {(["docs","workflow","validations"] as const).map(k => (
-            <button key={k} onClick={() => setSidebar(k)}
-              className={`px-3 py-1.5 text-xs font-medium rounded-md transition-all capitalize ${
-                sidebar === k ? "bg-white text-blue-700 shadow-sm" : "text-gray-500 hover:text-gray-700"
-              }`}>{k === "docs" ? "Documents" : k}</button>
-          ))}
-        </nav>
       </header>
 
-      {msg && (
-        <div className={`mx-6 mt-3 px-4 py-2.5 rounded-lg text-sm flex items-center gap-2 border shrink-0 ${
-          msgType === "error" ? "bg-red-50 border-red-200 text-red-700" :
-          msgType === "success" ? "bg-green-50 border-green-200 text-green-700" :
-          "bg-blue-50 border-blue-200 text-blue-700"
-        }`}>
-          <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${
-            msgType === "error" ? "bg-red-500" : msgType === "success" ? "bg-green-500" : "bg-blue-500"
-          }`} />
-          {msg}
-        </div>
-      )}
-
-      {classPopup && (
-        <ClassPopup name={classPopup.name} type={classPopup.type} conf={classPopup.conf}
-          onClose={() => setClassPopup(null)} />
-      )}
-
-      <div className="flex-1 flex gap-0 overflow-hidden">
-        {sidebar === "docs" && <AllDocumentsPage onMsg={pushMsg} onClassify={(n,t,c) => setClassPopup({name:n,type:t,conf:c})} />}
-        {sidebar === "workflow" && <WorkflowSection onMsg={pushMsg} />}
-        {sidebar === "validations" && <ValidationsSection onMsg={pushMsg} />}
-        <ChatSection onMsg={pushMsg} />
-      </div>
-    </div>
-  );
-}
-
-const CATEGORIES = [
-  "invoice", "purchase_order", "contract", "quotation", "certificate",
-  "hr_document", "audit_report", "financial_statement", "sop",
-  "engineering_drawing", "quality_report", "maintenance_report", "other",
-];
-
-function DocTypeBadge({ type }: { type?: string }) {
-  const colors: Record<string, string> = {
-    invoice: "bg-green-100 text-green-700 border-green-200",
-    purchase_order: "bg-blue-100 text-blue-700 border-blue-200",
-    contract: "bg-purple-100 text-purple-700 border-purple-200",
-    quotation: "bg-yellow-100 text-yellow-700 border-yellow-200",
-    certificate: "bg-orange-100 text-orange-700 border-orange-200",
-    hr_document: "bg-pink-100 text-pink-700 border-pink-200",
-    audit_report: "bg-red-100 text-red-700 border-red-200",
-    financial_statement: "bg-indigo-100 text-indigo-700 border-indigo-200",
-    sop: "bg-teal-100 text-teal-700 border-teal-200",
-    engineering_drawing: "bg-cyan-100 text-cyan-700 border-cyan-200",
-    quality_report: "bg-violet-100 text-violet-700 border-violet-200",
-    maintenance_report: "bg-amber-100 text-amber-700 border-amber-200",
-  };
-  const t = type || "unknown";
-  const cls = colors[t] || "bg-gray-100 text-gray-600 border-gray-200";
-  return <span className={`px-2 py-0.5 rounded-md text-[10px] font-semibold border ${cls}`}>{t.replace(/_/g, " ")}</span>;
-}
-
-function ClassPopup({ name, type, conf, onClose }: { name:string; type:string; conf:number; onClose:()=>void }) {
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/20 backdrop-blur-sm" onClick={onClose}>
-      <div className="bg-white rounded-2xl shadow-2xl max-w-sm w-full mx-4 overflow-hidden" onClick={e => e.stopPropagation()}>
-        <div className="bg-gradient-to-r from-blue-600 to-indigo-600 px-6 py-4 flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <h2 className="text-white font-bold text-sm">Classification Result</h2>
-          </div>
-          <button onClick={onClose} className="text-white/70 hover:text-white text-lg leading-none">&times;</button>
-        </div>
-        <div className="px-6 py-4">
-          <div className="text-xs text-gray-500 mb-1 truncate">{name}</div>
-          <div className="flex items-center gap-3 mb-2">
-            <DocTypeBadge type={type} />
-            <span className="text-xs text-gray-400">{(conf * 100).toFixed(0)}% confidence</span>
-          </div>
-          <div className="w-full bg-gray-100 rounded-full h-2">
-            <div className="bg-blue-600 h-2 rounded-full transition-all" style={{ width: `${Math.min(conf * 100, 100)}%` }} />
-          </div>
-        </div>
-        <div className="px-6 py-3 bg-gray-50 border-t border-gray-100 flex justify-end">
-          <button onClick={onClose} className="px-4 py-1.5 bg-blue-600 text-white rounded-lg text-xs font-medium hover:bg-blue-700 transition">OK</button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function UploadBox({ onUploadDone, onMsg, onClassify }: { onUploadDone: () => void; onMsg: (m: string, t?: "info"|"error"|"success") => void; onClassify: (name: string, type: string, conf: number) => void }) {
-  const [files, setFiles] = useState<File[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [progress, setProgress] = useState({current:0, total:0, currentName:""});
-  const [dragOver, setDragOver] = useState(false);
-  const [processingDocs, setProcessingDocs] = useState<{id:string;name:string;status:string;type?:string}[]>([]);
-  const inputRef = useRef<HTMLInputElement>(null);
-  const pollRefs = useRef<{[key:string]:ReturnType<typeof setInterval>}>({});
-  const notifiedRef = useRef<{[key:string]:boolean}>({});
-
-  const stopPoll = (id: string) => {
-    if (pollRefs.current[id]) { clearInterval(pollRefs.current[id]); delete pollRefs.current[id]; }
-  };
-
-  const startPoll = (docId: string, fileName: string) => {
-    stopPoll(docId);
-    pollRefs.current[docId] = setInterval(async () => {
-      try {
-        const r = await fetch(`${API}/api/v1/documents/${docId}?organization_id=${ORG}`);
-        if (!r.ok) { stopPoll(docId); return; }
-        const d = await safeJson(r as any);
-        setProcessingDocs(prev => prev.map(p => p.id === docId ? {...p, status: d.status, type: d.document_type} : p));
-        // Fire classify popup once when type is set
-        if (d.document_type && !notifiedRef.current[docId] && d.status !== "uploaded" && d.status !== "processing") {
-          notifiedRef.current[docId] = true;
-          onClassify(fileName, d.document_type, d.confidence || 0.85);
-        }
-        if (d.status === "processed" || d.status === "failed") {
-          stopPoll(docId);
-          setTimeout(() => {
-            setProcessingDocs(prev => prev.filter(p => p.id !== docId));
-            onUploadDone();
-          }, 3000);
-        }
-      } catch { stopPoll(docId); }
-    }, 2000);
-  };
-
-  const handleDrop = useCallback((e: React.DragEvent) => {
-    e.preventDefault(); setDragOver(false);
-    const dropped = Array.from(e.dataTransfer.files).filter(f => {
-      const ext = f.name.split(".").pop()?.toLowerCase();
-      return ["pdf","jpg","jpeg","png","tiff","tif","docx","xlsx","pptx"].includes(ext || "");
-    });
-    if (dropped.length) setFiles(prev => [...prev, ...dropped]);
-  }, []);
-
-  const uploadSingle = async (file: File): Promise<boolean> => {
-    try {
-      const form = new FormData();
-      form.append("file", file); form.append("organization_id", ORG); form.append("title", file.name);
-      const res = await fetch(`${API}/api/v1/documents/upload`, { method: "POST", body: form });
-      const data = await safeJson(res as any);
-      if (!res.ok) {
-        if (res.status === 409) {
-          onMsg(`Duplicate: ${data.detail || "file already exists"}`, "error");
-        } else {
-          onMsg(`Upload failed: ${file.name}`, "error");
-        }
-        return false;
-      }
-      setProcessingDocs(prev => [...prev, {id: data.id, name: file.name, status: "processing"}]);
-      startPoll(data.id, file.name);
-      return true;
-    } catch {
-      onMsg(`Cannot reach server (is backend running?)`, "error");
-      return false;
-    }
-  };
-
-  const handleUploadAll = async () => {
-    if (!files.length) return;
-    setLoading(true);
-    let success = 0;
-    for (let i = 0; i < files.length; i++) {
-      setProgress({ current: i + 1, total: files.length, currentName: files[i].name });
-      if (await uploadSingle(files[i])) success++;
-    }
-    setLoading(false);
-    setProgress({ current: 0, total: 0, currentName: "" });
-    setFiles([]);
-    if (success === 0) onUploadDone();
-  };
-
-  const procColor = (s: string) =>
-    s === "processed" ? "text-green-600" :
-    s === "failed" ? "text-red-600" :
-    "text-yellow-600";
-
-  return (
-    <div className="mb-4">
-      <div className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">Upload</div>
-      <div
-        className={`border-2 border-dashed rounded-lg p-4 text-center cursor-pointer transition-colors ${dragOver ? "border-blue-400 bg-blue-50" : "border-gray-200 hover:border-gray-300"}`}
-        onDrop={handleDrop} onDragOver={e => { e.preventDefault(); setDragOver(true); }} onDragLeave={() => setDragOver(false)}
-        onClick={() => inputRef.current?.click()}
-      >
-        <input ref={inputRef} type="file" multiple className="hidden" accept=".pdf,.jpg,.jpeg,.png,.tiff,.tif,.docx,.xlsx,.pptx"
-          onChange={e => { const f = Array.from(e.target.files || []); if (f.length) setFiles(prev => [...prev, ...f]); }} />
-        <div className="text-2xl mb-1 text-gray-400">{dragOver ? "📥" : "📂"}</div>
-        <p className="text-xs text-gray-500 font-medium">{files.length ? `${files.length} selected` : (dragOver ? "Drop" : "Click or drop")}</p>
-      </div>
-
-      {files.length > 0 && (
-        <div className="mt-2 space-y-1 max-h-24 overflow-y-auto">
-          {files.map((f, i) => (
-            <div key={i} className="flex items-center justify-between bg-gray-50 px-2 py-1.5 rounded text-xs">
-              <span className="truncate text-gray-700">{f.name}</span>
-              <button onClick={() => setFiles(prev => prev.filter((_, j) => j !== i))} className="text-red-400 hover:text-red-600 ml-1">&times;</button>
-            </div>
-          ))}
-        </div>
-      )}
-
-      {loading && progress.total > 0 && (
-        <div className="mt-2">
-          <div className="flex justify-between text-[10px] text-gray-400 mb-0.5">
-            <span className="truncate">{progress.currentName.substring(0, 30)}</span>
-            <span>{progress.current}/{progress.total}</span>
-          </div>
-          <div className="w-full bg-gray-200 rounded-full h-1.5">
-            <div className="bg-blue-600 h-1.5 rounded-full transition-all" style={{ width: `${(progress.current / progress.total) * 100}%` }} />
-          </div>
-        </div>
-      )}
-
-      {processingDocs.length > 0 && (
-        <div className="mt-2 space-y-1.5">
-          <div className="text-[10px] font-semibold text-gray-400 uppercase tracking-wider">Processing</div>
-          {processingDocs.map((p) => (
-            <div key={p.id} className="flex items-center justify-between bg-yellow-50/50 px-2 py-1.5 rounded text-xs">
-              <div className="flex items-center gap-2 min-w-0 flex-1">
-                {p.status !== "processed" && p.status !== "failed" ? (
-                  <span className="w-3 h-3 border-2 border-yellow-400 border-t-transparent rounded-full animate-spin shrink-0" />
-                ) : p.status === "processed" ? (
-                  <span className="text-green-500 shrink-0">✓</span>
-                ) : (
-                  <span className="text-red-500 shrink-0">✗</span>
-                )}
-                <span className="truncate text-gray-700">{p.name}</span>
-              </div>
-              <span className={`shrink-0 ml-1 font-medium ${procColor(p.status)}`}>
-                {["processing","uploaded","ocr_done","classified","extracted","embedded"].includes(p.status) ? "processing..." : p.status}
-              </span>
-            </div>
-          ))}
-        </div>
-      )}
-
-      <button onClick={handleUploadAll} disabled={!files.length || loading}
-        className="mt-2 w-full py-2 bg-blue-600 text-white rounded-lg text-xs font-medium hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition">
-        {loading ? `Uploading ${progress.current}/${progress.total}...` : `Upload & Process${files.length > 1 ? ` (${files.length})` : ""}`}
-      </button>
-    </div>
-  );
-}
-
-function DocDetail({ doc, onMsg, onClose }: { doc: any; onMsg: (m: string, t?: "info"|"error"|"success") => void; onClose?: () => void }) {
-  const [detail, setDetail] = useState<any>(null);
-  const [similar, setSimilar] = useState<any[]>([]);
-
-  const loadDetail = useCallback(async () => {
-    try {
-      const [r, s] = await Promise.all([
-        fetch(`${API}/api/v1/documents/${doc.id}?organization_id=${ORG}`),
-        fetch(`${API}/api/v1/search/similar/${doc.id}?organization_id=${ORG}&limit=3`),
-      ]);
-      const d = await safeJson(r as any);
-      if ((r as any).ok) setDetail(d);
-      const sd = await safeJson(s as any);
-      if ((s as any).ok) setSimilar(sd.results || []);
-    } catch {}
-  }, [doc.id]);
-
-  useState(() => { loadDetail(); });
-
-  return (
-    <div className="mt-3 pt-3 border-t border-gray-100">
-      <div className="flex items-center justify-between mb-2">
-        <div className="text-xs font-medium text-gray-800 truncate">{doc.title}</div>
-        <div className="flex items-center gap-1 shrink-0">
-          <a href={`${API}/api/v1/documents/${doc.id}/file?organization_id=${ORG}`} target="_blank"
-            className="text-[10px] px-2 py-1 bg-blue-600 text-white rounded hover:bg-blue-700 no-underline">Open</a>
-          {onClose && <button onClick={onClose} className="text-[10px] px-1.5 py-1 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded">&times;</button>}
-        </div>
-      </div>
-      <div className="grid grid-cols-2 gap-x-3 gap-y-1 text-[10px] text-gray-500 mb-1">
-        <div>Type: <span className="text-gray-700">{doc.document_type || "N/A"}</span></div>
-        <div>Status: <span className={`${doc.status === "processed" ? "text-green-600" : doc.status === "failed" ? "text-red-600" : "text-yellow-600"}`}>{doc.status}</span></div>
-        <div>Pages: {doc.page_count || "?"}</div>
-        <div>Size: {doc.file_size ? `${(doc.file_size/1024).toFixed(0)} KB` : "?"}</div>
-      </div>
-      {detail?.raw_text && (
-        <details className="mb-2">
-          <summary className="cursor-pointer text-[10px] text-gray-500 font-medium">OCR Preview</summary>
-          <pre className="mt-1 p-2 bg-gray-50 rounded text-[10px] max-h-24 overflow-y-auto whitespace-pre-wrap text-gray-600">{detail.raw_text.substring(0, 1000)}</pre>
-        </details>
-      )}
-      {similar.length > 0 && (
-        <div>
-          <div className="text-[10px] text-gray-500 font-medium mb-1">Similar Docs</div>
-          {similar.map((s, i) => (
-            <div key={i} className="text-[10px] py-0.5 flex items-center justify-between">
-              <span className="text-blue-600 truncate">{s.document_title || s.document_id?.substring(0, 12)}</span>
-              <span className="text-gray-400 shrink-0 ml-1">{(s.score * 100).toFixed(0)}%</span>
-            </div>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
-
-function AllDocumentsPage({ onMsg, onClassify }: { onMsg: (m: string, t?: "info"|"error"|"success") => void; onClassify: (name: string, type: string, conf: number) => void }) {
-  const [selectedDoc, setSelectedDoc] = useState<any>(null);
-  const [allDocs, setAllDocs] = useState<any[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [search, setSearch] = useState("");
-  const [deleting, setDeleting] = useState<string | null>(null);
-  const refreshRef = useRef(0);
-
-  const loadDocs = useCallback(async (q = "") => {
-    setLoading(true);
-    try {
-      const r = await fetch(`${API}/api/v1/documents?organization_id=${ORG}&q=${encodeURIComponent(q)}&limit=200`);
-      const d = await safeJson(r as any);
-      if ((r as any).ok) setAllDocs(d.documents || []);
-    } catch { onMsg("Failed to load documents", "error"); }
-    finally { setLoading(false); }
-  }, [onMsg]);
-
-  useState(() => { loadDocs(); });
-
-  const handleDelete = async (docId: string) => {
-    if (!confirm("Delete this document permanently?")) return;
-    setDeleting(docId);
-    try {
-      const r = await fetch(`${API}/api/v1/documents/${docId}?organization_id=${ORG}`, { method: "DELETE" });
-      if (r.ok) {
-        onMsg("Document deleted", "success");
-        setAllDocs(prev => prev.filter(d => d.id !== docId));
-        if (selectedDoc?.id === docId) setSelectedDoc(null);
-      } else {
-        const d = await safeJson(r as any);
-        onMsg(`Delete failed: ${d.detail || "error"}`, "error");
-      }
-    } catch { onMsg("Delete failed: server error", "error"); }
-    finally { setDeleting(null); }
-  };
-
-  const filtered = allDocs.filter(d =>
-    !search || d.title?.toLowerCase().includes(search.toLowerCase())
-  );
-
-  return (
-    <div className="w-80 lg:w-96 bg-white border-r border-gray-200 flex flex-col overflow-hidden shrink-0">
-      <div className="p-4 border-b border-gray-100">
-        <UploadBox onUploadDone={() => { refreshRef.current++; loadDocs(); }} onMsg={onMsg} onClassify={onClassify} />
-      </div>
-      <div className="p-4 border-b border-gray-100">
-        <div className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">All Documents ({allDocs.length})</div>
-        <input value={search} onChange={e => { setSearch(e.target.value); loadDocs(e.target.value); }}
-          placeholder="Filter by title..." className="w-full px-3 py-2 text-xs border border-gray-200 rounded-lg outline-none focus:ring-2 focus:ring-blue-200 bg-gray-50" />
-      </div>
-      <div className="flex-1 overflow-y-auto">
-        {loading && allDocs.length === 0 ? (
-          <div className="flex items-center justify-center h-32 text-xs text-gray-400">Loading...</div>
-        ) : filtered.length === 0 ? (
-          <div className="flex items-center justify-center h-32 text-xs text-gray-400">No documents found</div>
+      <div className="flex-1 flex overflow-hidden">
+        {tab === "docs" ? (
+          <AllDocumentsPage showToast={showToast} />
         ) : (
-          <div className="divide-y divide-gray-50">
-            {filtered.map((d) => (
-              <div key={d.id}
-                className={`px-4 py-3 cursor-pointer hover:bg-blue-50 transition-colors ${selectedDoc?.id === d.id ? "bg-blue-50 border-l-2 border-blue-500" : ""}`}
-                onClick={() => setSelectedDoc(d)}>
-                <div className="flex items-start justify-between gap-2">
-                  <div className="min-w-0 flex-1">
-                    <div className="text-xs font-medium text-gray-800 truncate">{d.title}</div>
-                    <div className="flex items-center gap-2 mt-1">
-                      <DocTypeBadge type={d.document_type} />
-                      <span className={`text-[10px] px-1.5 py-0.5 rounded font-medium ${
-                        d.status === "processed" ? "bg-green-100 text-green-700" :
-                        d.status === "failed" ? "bg-red-100 text-red-700" :
-                        d.status === "uploaded" ? "bg-gray-100 text-gray-600" :
-                        "bg-yellow-100 text-yellow-700"
-                      }`}>{d.status}</span>
-                    </div>
-                    <div className="text-[10px] text-gray-400 mt-1">
-                      {d.file_size ? `${(d.file_size/1024).toFixed(0)} KB` : ""}
-                      {d.created_at ? ` · ${new Date(d.created_at).toLocaleDateString()}` : ""}
-                    </div>
+          <ChatSection showToast={showToast} />
+        )}
+      </div>
+
+      {/* toast */}
+      {toast && (
+        <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-50 glass px-6 py-3 rounded-2xl shadow-2xl slide-up">
+          <p className="text-sm font-medium text-slate-800">{toast}</p>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ════════════════════════════════════════
+   DOCUMENTS
+   ════════════════════════════════════════ */
+function AllDocumentsPage({ showToast }: any) {
+  const [docs, setDocs] = useState<any[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [selected, setSelected] = useState<any>(null);
+  const [search, setSearch] = useState("");
+  const [classifyQueue, setClassifyQueue] = useState<any[]>([]);
+  const classifyQueueRef = useRef<any[]>([]);
+  const seenClassified = useRef<Set<string>>(new Set());
+  const prevDocsRef = useRef<any[]>([]);
+
+  useEffect(() => { load(); const i = setInterval(load, 5000); return () => clearInterval(i); }, []);
+
+  async function load() {
+    try {
+      const r = await fetch(`${API}/api/v1/documents?q=&limit=200&organization_id=${ORG}`);
+      const d = await r.json();
+      const newDocs: any[] = d?.documents || d || [];
+
+      const prev = prevDocsRef.current;
+      const added: any[] = [];
+      for (const nd of newDocs) {
+        if ((nd.status === "classified" || nd.status === "processed" || nd.status === "embedded") &&
+            !seenClassified.current.has(nd.id) && nd.document_type && nd.document_type !== "other") {
+          const old = prev.find((p: any) => p.id === nd.id);
+          const prevStatus = old?.status || "";
+          if (prevStatus !== nd.status && prevStatus !== "") {
+            seenClassified.current.add(nd.id);
+            added.push(nd);
+          }
+        }
+      }
+      if (added.length > 0) {
+        classifyQueueRef.current = [...classifyQueueRef.current, ...added];
+        setClassifyQueue([...classifyQueueRef.current]);
+      }
+
+      prevDocsRef.current = newDocs;
+      setDocs(newDocs);
+    } catch { } finally { setLoading(false); }
+  }
+
+  const nextInQueue = () => {
+    classifyQueueRef.current.shift();
+    setClassifyQueue([...classifyQueueRef.current]);
+  };
+
+  const handleTypeChange = async (docId: string, newType: string) => {
+    try {
+      await fetch(`${API}/api/v1/documents/${docId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ document_type: newType, organization_id: ORG }),
+      });
+      setDocs(prev => prev.map(d => d.id === docId ? { ...d, document_type: newType } : d));
+      nextInQueue();
+      showToast(`Document type updated to "${newType}" ✅`);
+    } catch {
+      showToast("Failed to update document type");
+    }
+  };
+
+  const filtered = docs.filter((d: any) =>
+    (d.title || "").toLowerCase().includes(search.toLowerCase())
+  );
+
+  return (
+    <div className="flex-1 flex overflow-hidden">
+      {/* document list */}
+      <div className="w-[420px] shrink-0 flex flex-col border-r border-slate-200/50 bg-white">
+        <div className="p-4 pb-3">
+          <div className="relative">
+            <svg className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+            </svg>
+            <input value={search} onChange={e => setSearch(e.target.value)}
+              className="w-full pl-10 pr-4 py-2.5 rounded-xl bg-slate-50 border border-slate-200 text-sm outline-none focus:ring-2 focus:ring-indigo-400/30 focus:border-indigo-400 transition-all"
+              placeholder="Search documents..." />
+          </div>
+        </div>
+        <UploadBox onUpload={() => { load(); showToast("Document uploaded successfully ✨"); }} />
+        <div className="flex-1 overflow-y-auto px-3 pb-3 space-y-2">
+          {loading && [...Array(4)].map((_, i) => (
+            <div key={i} className="h-20 rounded-xl bg-slate-100 animate-pulse" />
+          ))}
+          {!loading && filtered.length === 0 && (
+            <div className="text-center py-12 text-slate-400">
+              <p className="text-3xl mb-2">📄</p>
+              <p className="text-sm font-medium">No documents yet</p>
+              <p className="text-xs mt-1">Upload your first document above</p>
+            </div>
+          )}
+          {filtered.map((doc: any) => (
+            <button key={doc.id} onClick={() => setSelected(doc)}
+              className={`w-full text-left p-3.5 rounded-xl border transition-all duration-200 card-hover
+                ${selected?.id === doc.id ? "border-indigo-300 bg-indigo-50/50 shadow-md shadow-indigo-200/20" : "border-slate-200 bg-white hover:border-slate-300"}`}>
+              <div className="flex items-start justify-between gap-2">
+                <div className="min-w-0 flex-1">
+                  <p className="font-semibold text-sm text-slate-800 truncate">{doc.title || "Untitled"}</p>
+                  <div className="flex gap-1.5 mt-1.5 flex-wrap">
+                    <span className={`badge badge-sm ${typeColor(doc.document_type)}`}>{doc.document_type || "unknown"}</span>
+                    <span className={`badge badge-sm ${statusColor(doc.status)}`}>{doc.status}</span>
                   </div>
-                  <button onClick={e => { e.stopPropagation(); handleDelete(d.id); }} disabled={deleting === d.id}
-                    className="shrink-0 px-2 py-1 text-[10px] text-red-500 hover:bg-red-50 rounded transition disabled:opacity-50">
-                    {deleting === d.id ? "..." : "Delete"}
-                  </button>
+                  <p className="text-[11px] text-slate-400 mt-1.5">{timeAgo(doc.created_at)}</p>
                 </div>
               </div>
-            ))}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* detail panel */}
+      <div className="flex-1 overflow-y-auto bg-gradient-surface p-6">
+        {selected ? <DocDetail doc={selected} showToast={showToast} onDelete={() => { setSelected(null); load(); }} /> : (
+          <div className="h-full flex items-center justify-center text-slate-300">
+            <div className="text-center">
+              <p className="text-5xl mb-4">📋</p>
+              <p className="text-lg font-medium">Select a document to view details</p>
+            </div>
           </div>
         )}
       </div>
-      {selectedDoc && (
-        <div className="border-t border-gray-200 p-4 max-h-64 overflow-y-auto">
-          <DocDetail doc={selectedDoc} onMsg={onMsg} onClose={() => setSelectedDoc(null)} />
+
+      {/* classification popup queue */}
+      {classifyQueue.length > 0 && (
+        <ClassifyPopup
+          key={classifyQueue[0].id}
+          doc={classifyQueue[0]}
+          queueLen={classifyQueue.length}
+          onConfirm={handleTypeChange}
+          onDismiss={() => nextInQueue()}
+        />
+      )}
+    </div>
+  );
+}
+
+/* ─────── Classification Popup ─────── */
+function ClassifyPopup({ doc, queueLen = 1, onConfirm, onDismiss }: any) {
+  const [type, setType] = useState(doc.document_type || "");
+  const types = ["finance_agent", "procurement_agent", "hr_agent", "legal_agent", "compliance_agent"];
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm fade-in" onClick={onDismiss}>
+      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md p-6 mx-4 border border-slate-200 slide-up" onClick={e => e.stopPropagation()}>
+        <div className="flex items-center gap-3 mb-4">
+          <div className="w-10 h-10 rounded-xl bg-indigo-100 flex items-center justify-center">
+            <svg className="w-5 h-5 text-indigo-600" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+            </svg>
+          </div>
+          <div className="flex-1 min-w-0">
+            <div className="flex items-center gap-2">
+              <h3 className="font-bold text-lg text-slate-800">Classification Result</h3>
+              {queueLen > 1 && (
+                <span className="badge badge-sm bg-indigo-100 text-indigo-700 border-0 font-semibold">1 of {queueLen}</span>
+              )}
+            </div>
+            <p className="text-sm text-slate-500 truncate max-w-[300px]">{doc.title || "Untitled"}</p>
+          </div>
+        </div>
+
+        <div className="bg-gradient-to-r from-indigo-50 to-purple-50 rounded-xl p-4 mb-4 border border-indigo-100">
+          <p className="text-xs font-semibold text-indigo-600 uppercase tracking-wider mb-1">Detected Type</p>
+          <p className="text-lg font-bold text-slate-800">{doc.document_type}</p>
+        </div>
+
+        <div className="mb-4">
+          <label className="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1.5 block">Change Type</label>
+          <div className="relative">
+            <select value={type} onChange={e => setType(e.target.value)}
+              className="w-full px-4 py-2.5 rounded-xl border border-slate-200 bg-white text-sm appearance-none cursor-pointer outline-none focus:ring-2 focus:ring-indigo-400/30 focus:border-indigo-400 transition-all">
+              {types.map(t => <option key={t} value={t}>{t.replace(/_/g, " ")}</option>)}
+            </select>
+            <svg className="absolute right-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400 pointer-events-none" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
+            </svg>
+          </div>
+        </div>
+
+        <div className="flex gap-3">
+          <button onClick={() => onDismiss()}
+            className="flex-1 px-4 py-2.5 rounded-xl border border-slate-200 text-sm font-medium text-slate-600 hover:bg-slate-50 transition-all">
+            Dismiss
+          </button>
+          <button onClick={() => onConfirm(doc.id, type)}
+            className="flex-1 px-4 py-2.5 rounded-xl bg-indigo-600 text-sm font-semibold text-white hover:bg-indigo-700 transition-all shadow-md shadow-indigo-200">
+            Save
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ─────── Upload Box ─────── */
+function UploadBox({ onUpload }: any) {
+  const [files, setFiles] = useState<File[]>([]);
+  const [uploading, setUploading] = useState(false);
+  const [drag, setDrag] = useState(false);
+  const ref = useRef<HTMLInputElement>(null);
+
+  const addFiles = (list: FileList) => {
+    setFiles(prev => [...prev, ...Array.from(list)].slice(0, 5));
+  };
+
+  const upload = async () => {
+    if (!files.length) return;
+    setUploading(true);
+    for (let i = 0; i < files.length; i++) {
+      const fd = new FormData();
+      fd.append("file", files[i]);
+      fd.append("organization_id", ORG);
+      try {
+        await fetch(`${API}/api/v1/documents/upload`, { method: "POST", body: fd });
+      } catch { }
+    }
+    setFiles([]);
+    setUploading(false);
+    onUpload?.();
+  };
+
+  return (
+    <div className="px-3 pb-3">
+      <div
+        onDragOver={e => { e.preventDefault(); setDrag(true); }}
+        onDragLeave={() => setDrag(false)}
+        onDrop={e => { e.preventDefault(); setDrag(false); addFiles(e.dataTransfer.files); }}
+        onClick={() => ref.current?.click()}
+        className={`relative cursor-pointer rounded-xl border-2 border-dashed p-5 text-center transition-all duration-200
+          ${drag ? "border-indigo-400 bg-indigo-50/50" : "border-slate-200 hover:border-indigo-300 hover:bg-indigo-50/30"}`}>
+        <input ref={ref} type="file" hidden multiple accept=".pdf,.jpg,.jpeg,.png,.tiff,.tif,.docx,.xlsx,.pptx"
+          onChange={e => e.target.files && addFiles(e.target.files)} />
+        <div className="flex flex-col items-center gap-1.5">
+          <div className="w-10 h-10 rounded-full bg-indigo-100 flex items-center justify-center">
+            <svg className="w-5 h-5 text-indigo-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
+            </svg>
+          </div>
+          <p className="text-xs font-medium text-slate-600">
+            {drag ? "Drop here" : "Drop files or click to upload"}
+          </p>
+          <p className="text-[10px] text-slate-400">PDF, Images, Office docs</p>
+        </div>
+      </div>
+
+      {files.length > 0 && (
+        <div className="mt-2 space-y-1.5">
+          {files.map((f, i) => (
+            <div key={i} className="relative flex items-center justify-between px-3 py-2 bg-white rounded-lg border border-slate-200 text-xs overflow-hidden">
+              <span className="truncate text-slate-700 font-medium">{f.name}</span>
+              <span className="text-slate-400 shrink-0 ml-2">{(f.size / 1024 / 1024).toFixed(1)}MB</span>
+              {uploading && (
+                <div className="absolute inset-0 bg-white/70 flex items-center justify-center rounded-lg">
+                  <span className="loading loading-spinner loading-sm text-indigo-500" />
+                </div>
+              )}
+            </div>
+          ))}
+          <button onClick={upload} disabled={uploading}
+            className="btn btn-primary btn-sm w-full bg-gradient-to-r from-indigo-500 to-purple-500 text-white border-0 shadow-lg shadow-indigo-500/20 hover:shadow-xl hover:shadow-indigo-500/30 transition-all">
+            {uploading ? <><span className="loading loading-spinner loading-xs" /> Uploading...</> : `Upload ${files.length} file${files.length > 1 ? "s" : ""}`}
+          </button>
         </div>
       )}
     </div>
   );
 }
 
-function WorkflowSection({ onMsg }: { onMsg: (m: string, t?: "info"|"error"|"success") => void }) {
-  const [pending, setPending] = useState<any[]>([]);
-  const [loading, setLoading] = useState(false);
+/* ─────── Doc Detail ─────── */
+function DocDetail({ doc, showToast, onDelete }: any) {
+  const [similar, setSimilar] = useState<any[]>([]);
 
-  const loadPending = async () => {
-    setLoading(true);
-    try {
-      const r = await fetch(`${API}/api/v1/documents/workflows/pending?organization_id=${ORG}`);
-      const d = await safeJson(r as any);
-      if ((r as any).ok) setPending(d.pending_approvals || []);
-    } catch {}
-    finally { setLoading(false); }
-  };
+  useEffect(() => {
+    fetch(`${API}/api/v1/search/similar/${doc.id}?organization_id=${ORG}`)
+      .then(r => r.json()).then(d => setSimilar(d?.results || d || [])).catch(() => {});
+  }, [doc.id]);
 
-  const approve = async (docId: string) => {
-    await fetch(`${API}/api/v1/documents/${docId}/workflow/approve?organization_id=${ORG}&approver=admin&notes=Approved+from+UI`, { method: "POST" });
-    onMsg("Document approved", "success");
-    loadPending();
-  };
-
-  const reject = async (docId: string) => {
-    const reason = prompt("Rejection reason:");
-    if (!reason) return;
-    await fetch(`${API}/api/v1/documents/${docId}/workflow/reject?organization_id=${ORG}&approver=admin&reason=${encodeURIComponent(reason)}`, { method: "POST" });
-    onMsg("Document rejected", "error");
-    loadPending();
+  const del = async () => {
+    if (!confirm("Delete this document?")) return;
+    await fetch(`${API}/api/v1/documents/${doc.id}?organization_id=${ORG}`, { method: "DELETE" });
+    showToast("Document deleted");
+    onDelete?.();
   };
 
   return (
-    <div className="w-72 lg:w-80 bg-white border-r border-gray-200 p-4 overflow-y-auto shrink-0">
-      <div className="flex items-center justify-between mb-4">
-        <div className="text-xs font-semibold text-gray-500 uppercase tracking-wider">Approvals</div>
-        <button onClick={loadPending} className="text-xs px-2.5 py-1 bg-blue-600 text-white rounded hover:bg-blue-700">{loading ? "..." : "Refresh"}</button>
+    <div className="max-w-2xl slide-up">
+      <div className="flex items-start justify-between mb-6">
+        <div>
+          <h2 className="text-2xl font-bold text-slate-800">{doc.title || "Untitled"}</h2>
+          <div className="flex gap-2 mt-2">
+            <span className={`badge ${typeColor(doc.document_type)}`}>{doc.document_type || "unknown"}</span>
+            <span className={`badge ${statusColor(doc.status)}`}>{doc.status}</span>
+          </div>
+        </div>
+        <button onClick={del} className="btn btn-ghost btn-sm text-red-400 hover:bg-red-50 hover:text-red-500">
+          <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+          </svg>
+        </button>
       </div>
-      {pending.length === 0 && !loading && <p className="text-xs text-gray-400 text-center py-8">No pending approvals</p>}
-      <div className="space-y-2">
-        {pending.map((w, i) => (
-          <div key={i} className="border border-gray-200 rounded-lg p-3">
-            <div className="flex items-center justify-between mb-1">
-              <span className="text-xs font-medium text-gray-700">{w.document_id?.substring(0, 12)}...</span>
-              <div className="flex gap-1">
-                <button onClick={() => approve(w.document_id)} className="px-2 py-0.5 text-[10px] bg-green-600 text-white rounded hover:bg-green-700">Approve</button>
-                <button onClick={() => reject(w.document_id)} className="px-2 py-0.5 text-[10px] bg-red-600 text-white rounded hover:bg-red-700">Reject</button>
+
+      <div className="grid grid-cols-2 gap-3 mb-6">
+        {[
+          ["File", doc.original_file_url?.split("/").pop() || "—"],
+          ["Pages", doc.page_count ?? "—"],
+          ["Size", doc.file_size ? `${(doc.file_size / 1024).toFixed(0)} KB` : "—"],
+          ["Created", doc.created_at ? new Date(doc.created_at).toLocaleDateString() : "—"],
+        ].map(([l, v]) => (
+          <div key={l} className="bg-white rounded-xl border border-slate-200 p-4">
+            <p className="text-xs font-medium text-slate-400 uppercase tracking-wider">{l}</p>
+            <p className="text-sm font-semibold text-slate-700 mt-1 truncate">{v}</p>
+          </div>
+        ))}
+      </div>
+
+      {doc.original_file_url && (
+        <a href={`${API}/api/v1/documents/${doc.id}/file?organization_id=${ORG}`} target="_blank"
+          className="btn btn-outline btn-sm mb-6 border-slate-300 text-slate-600 hover:bg-slate-100">
+          <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+          </svg>
+          Open File
+        </a>
+      )}
+
+      {doc.raw_text && (
+        <details className="bg-white rounded-xl border border-slate-200 mb-6 overflow-hidden">
+          <summary className="px-4 py-3 text-sm font-semibold text-slate-700 cursor-pointer hover:bg-slate-50 transition-colors">
+            OCR Preview ({doc.raw_text.length.toLocaleString()} chars)
+          </summary>
+          <div className="max-h-64 overflow-y-auto p-4 bg-slate-50 text-xs text-slate-600 font-mono leading-relaxed whitespace-pre-wrap">
+            {doc.raw_text.slice(0, 3000)}
+          </div>
+        </details>
+      )}
+
+      {similar.length > 0 && (
+        <div>
+          <h3 className="text-sm font-semibold text-slate-700 mb-3">Similar Documents</h3>
+          <div className="space-y-2">
+            {similar.slice(0, 5).map((s: any, i: number) => (
+              <div key={i} className="flex items-center justify-between bg-white rounded-xl border border-slate-200 px-4 py-3">
+                <span className="text-sm text-slate-700 truncate">{s.document_title || s.document_id?.slice(0, 12)}</span>
+                <span className="text-xs text-slate-400 ml-2">{(s.score * 100).toFixed(0)}% match</span>
               </div>
-            </div>
-            <div className="text-[10px] text-gray-500">Stage: <span className="text-blue-600 font-medium">{w.current_stage}</span></div>
-            <div className="text-[10px] text-gray-400">{w.workflow_type} &middot; {w.approvals_obtained}/{w.approvals_required}</div>
+            ))}
           </div>
-        ))}
-      </div>
+        </div>
+      )}
     </div>
   );
 }
 
-function ValidationsSection({ onMsg }: { onMsg: (m: string, t?: "info"|"error"|"success") => void }) {
-  const [validations, setValidations] = useState<any[]>([]);
-  const [loading, setLoading] = useState(false);
-
-  const load = async () => {
-    setLoading(true);
-    try {
-      const r = await fetch(`${API}/api/v1/documents/validations/list?organization_id=${ORG}&limit=50`);
-      const d = await safeJson(r as any);
-      if ((r as any).ok) setValidations(d.validations || []);
-    } catch {}
-    finally { setLoading(false); }
-  };
-
-  return (
-    <div className="w-72 lg:w-80 bg-white border-r border-gray-200 p-4 overflow-y-auto shrink-0">
-      <div className="flex items-center justify-between mb-4">
-        <div className="text-xs font-semibold text-gray-500 uppercase tracking-wider">Validations</div>
-        <button onClick={load} className="text-xs px-2.5 py-1 bg-blue-600 text-white rounded hover:bg-blue-700">{loading ? "..." : "Refresh"}</button>
-      </div>
-      {validations.length === 0 && !loading && <p className="text-xs text-gray-400 text-center py-8">No validation results</p>}
-      <div className="space-y-1.5 max-h-[calc(100vh-160px)] overflow-y-auto">
-        {validations.map((v, i) => (
-          <div key={i} className={`border-l-4 p-2.5 rounded-r-lg text-xs ${v.severity === "error" ? "border-l-red-500 bg-red-50" : v.severity === "warning" ? "border-l-yellow-500 bg-yellow-50" : "border-l-green-500 bg-green-50"}`}>
-            <div className="font-medium text-gray-800">{v.validation_type?.replace(/_/g, " ")}</div>
-            <div className="text-gray-500 mt-0.5">{v.discrepancy_details || `${v.source_field}: ${v.expected_value} → ${v.actual_value || "N/A"}`}</div>
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-}
-
-function ChatSection({ onMsg }: { onMsg: (m: string, t?: "info"|"error"|"success") => void }) {
+/* ════════════════════════════════════════
+   CHAT SECTION
+   ════════════════════════════════════════ */
+function ChatSection({ showToast }: any) {
   const [question, setQuestion] = useState("");
-  const [messages, setMessages] = useState<{role:string;content:string}[]>([]);
+  const [messages, setMessages] = useState<any[]>([]);
   const [loading, setLoading] = useState(false);
   const [docQuery, setDocQuery] = useState("");
   const [selectedDocs, setSelectedDocs] = useState<any[]>([]);
   const [docs, setDocs] = useState<any[]>([]);
-  const [searching, setSearching] = useState(false);
   const [sources, setSources] = useState<any[]>([]);
   const [sessions, setSessions] = useState<any[]>([]);
-  const [activeSessionId, setActiveSessionId] = useState<string|null>(null);
-  const [showSessions, setShowSessions] = useState(true);
-  const chatEnd = useRef<HTMLDivElement>(null);
-  const timerRef = useRef<any>(null);
+  const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
+  const [showSessions, setShowSessions] = useState(false);
+  const bottomRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
 
-  const loadSessions = useCallback(async () => {
-    try {
-      const r = await fetch(`${API}/api/v1/chat/sessions?organization_id=${ORG}`);
-      const d = await safeJson(r as any);
-      if ((r as any).ok) setSessions(d.sessions || []);
-    } catch {}
+  useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: "smooth" }); }, [messages, loading]);
+
+  useEffect(() => {
+    fetch(`${API}/api/v1/chat/sessions?organization_id=${ORG}`)
+      .then(r => r.json()).then(d => setSessions(d?.sessions || d || [])).catch(() => {});
   }, []);
 
-  useEffect(() => { loadSessions(); }, [loadSessions]);
+  const loadSession = useCallback(async (sid: string) => {
+    try {
+      const r = await fetch(`${API}/api/v1/chat/sessions/${sid}?organization_id=${ORG}`);
+      const d = await r.json();
+      const msgs = d?.messages || [];
+      setMessages(msgs.map((m: any) => ({ role: m.role, content: m.content })));
+      setActiveSessionId(sid);
+      setShowSessions(false);
+    } catch { }
+  }, []);
 
-  const startNewChat = () => {
-    setActiveSessionId(null);
+  const newSession = () => {
     setMessages([]);
+    setActiveSessionId(null);
     setSources([]);
     setSelectedDocs([]);
-    setDocQuery("");
   };
 
-  const loadSession = async (sid: string) => {
-    try {
-      const r = await fetch(`${API}/api/v1/chat/sessions/${sid}`);
-      const d = await safeJson(r as any);
-      if ((r as any).ok && d) {
-        setActiveSessionId(d.id);
-        setMessages((d.messages || []).map((m: any) => ({role: m.role, content: m.content})));
-        setSources([]);
-        const docIds = d.document_ids || [];
-        if (docIds.length > 0) {
-          const fr = await fetch(`${API}/api/v1/documents?organization_id=${ORG}&limit=100`);
-          const fd = await safeJson(fr as any);
-          if ((fr as any).ok) {
-            const allDocs: any[] = fd.documents || [];
-            setSelectedDocs(allDocs.filter((dd: any) => docIds.includes(dd.id)));
-          }
-        } else {
-          setSelectedDocs([]);
-        }
-      }
-    } catch {}
-  };
-
-  const deleteSession = async (sid: string, e: React.MouseEvent) => {
-    e.stopPropagation();
-    try {
-      await fetch(`${API}/api/v1/chat/sessions/${sid}`, { method: "DELETE" });
-      if (activeSessionId === sid) startNewChat();
-      loadSessions();
-    } catch {}
-  };
-
-  const removeDoc = (docId: string) => {
-    setSelectedDocs(prev => prev.filter(d => d.id !== docId));
+  const deleteSession = async (sid: string) => {
+    await fetch(`${API}/api/v1/chat/sessions/${sid}?organization_id=${ORG}`, { method: "DELETE" });
+    setSessions(prev => prev.filter(s => s.id !== sid));
+    if (activeSessionId === sid) newSession();
   };
 
   const searchDocs = async (q: string) => {
+    setDocQuery(q);
     if (!q.trim()) { setDocs([]); return; }
-    setSearching(true);
     try {
-      const r = await fetch(`${API}/api/v1/documents?organization_id=${ORG}&q=${encodeURIComponent(q)}&limit=20`);
-      const d = await safeJson(r as any);
-      if ((r as any).ok) { setDocs(d.documents || []); } else { setDocs([]); }
-    } catch { setDocs([]); }
-    finally { setSearching(false); }
+      const r = await fetch(`${API}/api/v1/documents?q=${encodeURIComponent(q)}&limit=10&organization_id=${ORG}`);
+      const d = await r.json();
+      setDocs(d?.documents || d || []);
+    } catch { }
   };
 
-  const addDoc = (doc: any) => {
-    if (!selectedDocs.find(d => d.id === doc.id)) {
-      setSelectedDocs(prev => [...prev, doc]);
-    }
+  const toggleDoc = (doc: any) => {
+    setSelectedDocs(prev =>
+      prev.find(d => d.id === doc.id) ? prev.filter(d => d.id !== doc.id) : [...prev, doc]
+    );
     setDocQuery("");
     setDocs([]);
   };
 
-  const ask = async () => {
-    if (!question.trim()) return;
-    setLoading(true);
-    const userMsg = question;
+  const send = async () => {
+    const q = question.trim();
+    if (!q || loading) return;
     setQuestion("");
-    setMessages(prev => [...prev, {role:"user", content:userMsg}]);
+    setMessages(prev => [...prev, { role: "user", content: q }]);
+    setLoading(true);
+    setSources([]);
+
     try {
       const docIds = selectedDocs.map(d => d.id);
-      const sid = activeSessionId || undefined;
-      const body: any = { question: userMsg, organization_id: ORG, document_ids: docIds, session_id: sid };
-      const r = await fetch(`${API}/api/v1/chat`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
-      const d = await safeJson(r as any);
-      if ((r as any).ok) {
-        if (d.session_id) setActiveSessionId(d.session_id);
-        setMessages(prev => [...prev, {role:"assistant", content:d.answer || "No answer"}]);
-        if (d.history && d.history.length > 0) setMessages(d.history);
-        setSources(d.sources || []);
-        loadSessions();
-      } else {
-        setMessages(prev => [...prev, {role:"assistant", content:`Error: ${d.detail}`}]);
-      }
-    } catch (e: any) {
-      setMessages(prev => [...prev, {role:"assistant", content:`Error: ${e.message}`}]);
-    }
-    finally { setLoading(false); setTimeout(() => chatEnd.current?.scrollIntoView({behavior:"smooth"}), 100); }
+      const body: any = { question: q, organization_id: ORG, document_ids: docIds };
+      if (activeSessionId) body.session_id = activeSessionId;
+
+      const r = await fetch(`${API}/api/v1/chat`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const data = await r.json();
+
+      setMessages(prev => [...prev, { role: "assistant", content: data.answer }]);
+      if (data.session_id) setActiveSessionId(data.session_id);
+      if (data.sources) setSources(data.sources);
+
+      fetch(`${API}/api/v1/chat/sessions?organization_id=${ORG}`)
+        .then(r => r.json()).then(d => setSessions(d?.sessions || d || [])).catch(() => {});
+
+    } catch { setMessages(prev => [...prev, { role: "assistant", content: "⚠️ Connection error. Please check the backend." }]); }
+    finally { setLoading(false); }
   };
 
   return (
-    <div className="flex-1 flex bg-white">
+    <div className="flex-1 flex overflow-hidden">
+      {/* sessions sidebar */}
       {showSessions && (
-        <div className="w-60 border-r border-gray-200 flex flex-col bg-gray-50 shrink-0">
-          <div className="p-3 border-b border-gray-200 flex items-center justify-between">
-            <span className="text-xs font-semibold text-gray-600 uppercase tracking-wider">History</span>
-            <button onClick={startNewChat}
-              className="text-xs px-2.5 py-1 bg-blue-600 text-white rounded-lg hover:bg-blue-700 font-medium">+ New</button>
+        <div className="w-72 shrink-0 border-r border-slate-200/50 bg-white flex flex-col">
+          <div className="p-4 border-b border-slate-100">
+            <button onClick={newSession}
+              className="btn btn-primary btn-sm w-full bg-gradient-to-r from-indigo-500 to-purple-500 text-white border-0 shadow-md">
+              + New Chat
+            </button>
           </div>
-          <div className="flex-1 overflow-y-auto">
-            {sessions.length === 0 ? (
-              <div className="p-4 text-xs text-gray-400 text-center">No chat history yet</div>
-            ) : (
-              sessions.map(s => (
-                <div key={s.id} onClick={() => loadSession(s.id)}
-                  className={`px-3 py-2.5 border-b border-gray-100 cursor-pointer hover:bg-blue-50 transition text-xs group ${
-                    activeSessionId === s.id ? "bg-blue-50 border-l-2 border-l-blue-600" : ""
-                  }`}>
-                  <div className="flex items-start justify-between">
-                    <div className="flex-1 min-w-0">
-                      <p className="font-medium text-gray-800 truncate">{s.title}</p>
-                      <p className="text-gray-400 mt-0.5">{s.document_ids?.length ? `${s.document_ids.length} doc(s)` : "All Documents"}</p>
-                    </div>
-                    <button onClick={(e) => deleteSession(s.id, e)}
-                      className="text-gray-300 hover:text-red-500 ml-1 shrink-0">&times;</button>
-                  </div>
-                  <p className="text-gray-300 mt-1">
-                    {s.updated_at ? new Date(s.updated_at).toLocaleDateString() : ""}
-                  </p>
+          <div className="flex-1 overflow-y-auto p-3 space-y-1">
+            {sessions.map((s: any) => (
+              <div key={s.id}
+                className={`group flex items-center justify-between px-3 py-2.5 rounded-xl cursor-pointer transition-all
+                  ${activeSessionId === s.id ? "bg-indigo-50 text-indigo-700" : "hover:bg-slate-50 text-slate-600"}`}
+                onClick={() => loadSession(s.id)}>
+                <div className="min-w-0 flex-1">
+                  <p className="text-sm font-medium truncate">{s.title || "New Chat"}</p>
+                  <p className="text-[10px] text-slate-400 mt-0.5">{timeAgo(s.updated_at || s.created_at)}</p>
                 </div>
-              ))
-            )}
+                <button onClick={e => { e.stopPropagation(); deleteSession(s.id); }}
+                  className="opacity-0 group-hover:opacity-100 p-1 hover:bg-red-50 rounded-lg transition-all">
+                  <svg className="w-3.5 h-3.5 text-red-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                  </svg>
+                </button>
+              </div>
+            ))}
           </div>
         </div>
       )}
-      <div className="flex-1 flex flex-col">
-        <div className="border-b border-gray-200 px-6 py-3 flex items-center gap-3 shrink-0">
-          <button onClick={() => setShowSessions(!showSessions)} title="Toggle history sidebar"
-            className="text-gray-400 hover:text-gray-600 text-lg leading-none mr-1">
-            {showSessions ? "◀" : "☰"}
+
+      {/* main chat area */}
+      <div className="flex-1 flex flex-col bg-white">
+        {/* top bar */}
+        <div className="shrink-0 flex items-center gap-3 px-5 py-3 border-b border-slate-100">
+          <button onClick={() => setShowSessions(!showSessions)}
+            className="btn btn-ghost btn-sm btn-square text-slate-400 hover:text-slate-600">
+            <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M4 6h16M4 12h16M4 18h16" />
+            </svg>
           </button>
+
           <div className="relative flex-1 max-w-md">
-            <input value={docQuery} onChange={e => { const v=e.target.value; setDocQuery(v); if (timerRef.current) clearTimeout(timerRef.current); timerRef.current = setTimeout(() => searchDocs(v), 300); }}
-              placeholder="Search & select documents..."
-              className="w-full px-3 py-2 text-xs border border-gray-200 rounded-lg outline-none focus:ring-2 focus:ring-blue-200 bg-gray-50" />
-            {searching && <span className="absolute right-2.5 top-2 text-xs text-gray-400">...</span>}
+            <svg className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+            </svg>
+            <input value={docQuery} onChange={e => searchDocs(e.target.value)}
+              className="w-full pl-10 pr-4 py-2 rounded-xl bg-slate-50 border border-slate-200 text-sm outline-none focus:ring-2 focus:ring-indigo-400/30 focus:border-indigo-400 transition-all"
+              placeholder="Search & attach documents..." />
             {docs.length > 0 && (
-              <div className="absolute z-20 w-full mt-1 bg-white border border-gray-200 rounded-lg shadow-lg max-h-48 overflow-y-auto">
-                {docs.filter(d => !selectedDocs.find(sd => sd.id === d.id)).map((d, i) => (
-                  <div key={i} onClick={() => addDoc(d)}
-                       className="px-3 py-2.5 hover:bg-blue-50 cursor-pointer border-b border-gray-100 last:border-0 text-xs">
-                    <span className="font-medium text-blue-700">{d.title}</span>
-                    <span className="text-gray-400 ml-2">{d.document_type}</span>
-                  </div>
+              <div className="absolute top-full mt-1 left-0 right-0 bg-white rounded-xl border border-slate-200 shadow-xl z-10 overflow-hidden">
+                {docs.map((doc: any) => (
+                  <button key={doc.id} onClick={() => toggleDoc(doc)}
+                    className="flex items-center justify-between w-full px-4 py-3 text-sm hover:bg-slate-50 transition-colors">
+                    <span className="truncate text-slate-700">{doc.title || "Untitled"}</span>
+                    <span className={`badge badge-sm ${typeColor(doc.document_type)}`}>{doc.document_type}</span>
+                  </button>
                 ))}
               </div>
             )}
           </div>
-        </div>
 
-        {selectedDocs.length > 0 && (
-          <div className="px-6 py-2 border-b border-gray-100 flex flex-wrap gap-1.5 items-center bg-gray-50">
-            <span className="text-[10px] text-gray-400 font-medium mr-1">Documents:</span>
-            {selectedDocs.map(d => (
-              <span key={d.id} className="inline-flex items-center gap-1 px-2 py-0.5 bg-blue-100 text-blue-700 rounded-full text-[11px] font-medium">
-                {d.title}
-                <button onClick={() => removeDoc(d.id)} className="text-blue-400 hover:text-red-500 leading-none">&times;</button>
-              </span>
-            ))}
-            <button onClick={() => setSelectedDocs([])} className="text-[10px] text-gray-400 hover:text-red-500 ml-1">Clear</button>
-          </div>
-        )}
-
-        <div className="flex-1 overflow-y-auto px-6 py-4" style={{maxHeight: "calc(100vh - 200px)"}}>
-          {messages.length === 0 ? (
-            <div className="flex items-center justify-center h-full">
-              <div className="text-center">
-                <div className="text-4xl mb-3 text-gray-300">💬</div>
-                <p className="text-sm text-gray-400 font-medium">
-                  {selectedDocs.length > 0
-                    ? `Ask about ${selectedDocs.length} document(s)`
-                    : "Search & select documents to ask questions"}
-                </p>
-                <p className="text-xs text-gray-300 mt-1">Type a question below to start</p>
-              </div>
-            </div>
-          ) : (
-            <div className="max-w-3xl mx-auto space-y-4">
-              {messages.map((m, i) => (
-                <div key={i} className={`flex ${m.role === "user" ? "justify-end" : "justify-start"}`}>
-                  <div className={`max-w-[75%] px-4 py-3 rounded-xl text-sm leading-relaxed ${
-                    m.role === "user"
-                      ? "bg-blue-600 text-white rounded-br-sm"
-                      : "bg-gray-50 border border-gray-100 text-gray-800 rounded-bl-sm"
-                  }`}>
-                    <div className="whitespace-pre-wrap">{m.content}</div>
-                  </div>
-                </div>
-              ))}
-              {loading && (
-                <div className="flex justify-start">
-                  <div className="bg-gray-50 border border-gray-100 rounded-xl rounded-bl-sm px-4 py-3 text-sm text-gray-400 flex items-center gap-1.5">
-                    <span className="w-1.5 h-1.5 bg-gray-400 rounded-full" style={{animation:"bounce 1.4s infinite",animationDelay:"0ms"}} />
-                    <span className="w-1.5 h-1.5 bg-gray-400 rounded-full" style={{animation:"bounce 1.4s infinite",animationDelay:"200ms"}} />
-                    <span className="w-1.5 h-1.5 bg-gray-400 rounded-full" style={{animation:"bounce 1.4s infinite",animationDelay:"400ms"}} />
-                  </div>
-                </div>
-              )}
-              <div ref={chatEnd} />
-            </div>
+          {activeSessionId && (
+            <button onClick={newSession} className="btn btn-ghost btn-sm text-slate-400 hover:text-indigo-500">
+              + New
+            </button>
           )}
         </div>
 
+        {/* selected docs chips */}
+        {selectedDocs.length > 0 && (
+          <div className="shrink-0 flex items-center gap-2 px-5 py-2 bg-indigo-50/40 border-b border-indigo-100/50">
+            <span className="text-[11px] font-semibold text-indigo-500 uppercase tracking-wider">Context:</span>
+            {selectedDocs.map(d => (
+              <span key={d.id}
+                className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-white border border-indigo-200 text-xs font-medium text-indigo-700 shadow-sm">
+                {d.title || d.id.slice(0, 8)}
+                <button onClick={() => toggleDoc(d)} className="hover:text-red-500 transition-colors">
+                  <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+                  </svg>
+                </button>
+              </span>
+            ))}
+            <button onClick={() => setSelectedDocs([])} className="text-[11px] text-slate-400 hover:text-red-400 ml-auto transition-colors">
+              Clear
+            </button>
+          </div>
+        )}
+
+        {/* messages */}
+        <div className="flex-1 overflow-y-auto px-5 py-4 space-y-4">
+          {messages.length === 0 && !loading && (
+            <div className="h-full flex items-center justify-center">
+              <div className="text-center max-w-md">
+                <div className="w-16 h-16 rounded-2xl gradient-primary flex items-center justify-center mx-auto mb-4 shadow-lg shadow-indigo-500/20">
+                  <svg className="w-8 h-8 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
+                  </svg>
+                </div>
+                <h3 className="text-xl font-bold text-slate-700 mb-2">How can I help you?</h3>
+                <p className="text-sm text-slate-400 leading-relaxed">
+                  Ask questions about your documents. Select documents from the search bar above to narrow the context.
+                </p>
+              </div>
+            </div>
+          )}
+
+          {messages.map((m, i) => (
+            <div key={i} className={`flex ${m.role === "user" ? "justify-end" : "justify-start"} message-appear`}>
+              <div className={`max-w-[75%] ${m.role === "user" ? "order-1" : "order-1"}`}>
+                {m.role === "user" ? (
+                  <div className="px-4 py-3 rounded-2xl bg-gradient-to-r from-indigo-500 to-purple-500 text-white shadow-lg shadow-indigo-500/20">
+                    <p className="text-sm leading-relaxed whitespace-pre-wrap">{m.content}</p>
+                  </div>
+                ) : (
+                  <div className="flex items-start gap-3">
+                    <div className="w-8 h-8 rounded-xl gradient-primary flex items-center justify-center shadow-md shrink-0 mt-0.5">
+                      <svg className="w-4 h-4 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M9.75 3.104v5.714a2.25 2.25 0 01-.659 1.591L5 14.5M9.75 3.104c-.251.023-.501.05-.75.082m.75-.082a24.301 24.301 0 014.5 0m0 0v5.714c0 .597.237 1.17.659 1.591L19.8 15.3M14.25 3.104c.251.023.501.05.75.082M19.8 15.3l-1.57.393A9.065 9.065 0 0112 15a9.065 9.065 0 00-6.23.693L5 14.5m14.8.8l1.402 1.402c1.232 1.232.65 3.318-1.067 3.611A48.309 48.309 0 0112 21c-2.773 0-5.491-.235-8.135-.687-1.718-.293-2.3-2.379-1.067-3.61L5 14.5" />
+                      </svg>
+                    </div>
+                    <div className="px-4 py-3 rounded-2xl bg-slate-50 border border-slate-200/60 shadow-sm">
+                      <p className="text-sm leading-relaxed text-slate-700 whitespace-pre-wrap">{m.content}</p>
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+          ))}
+
+          {loading && (
+            <div className="flex justify-start message-appear">
+              <div className="flex items-start gap-3">
+                <div className="w-8 h-8 rounded-xl gradient-primary flex items-center justify-center shadow-md shrink-0">
+                  <svg className="w-4 h-4 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M9.75 3.104v5.714a2.25 2.25 0 01-.659 1.591L5 14.5M9.75 3.104c-.251.023-.501.05-.75.082m.75-.082a24.301 24.301 0 014.5 0m0 0v5.714c0 .597.237 1.17.659 1.591L19.8 15.3M14.25 3.104c.251.023.501.05.75.082M19.8 15.3l-1.57.393A9.065 9.065 0 0112 15a9.065 9.065 0 00-6.23.693L5 14.5m14.8.8l1.402 1.402c1.232 1.232.65 3.318-1.067 3.611A48.309 48.309 0 0112 21c-2.773 0-5.491-.235-8.135-.687-1.718-.293-2.3-2.379-1.067-3.61L5 14.5" />
+                  </svg>
+                </div>
+                <div className="px-5 py-3.5 rounded-2xl bg-slate-50 border border-slate-200/60 shadow-sm">
+                  <TypingDots />
+                </div>
+              </div>
+            </div>
+          )}
+          <div ref={bottomRef} />
+        </div>
+
+        {/* sources */}
         {sources.length > 0 && (
-          <div className="px-6 py-2 border-t border-gray-100 bg-gray-50">
-            <details className="text-xs text-gray-500">
-              <summary className="cursor-pointer font-medium">Sources ({sources.length})</summary>
-              <div className="mt-1 space-y-0.5">
-                {sources.slice(0, 3).map((s, i) => (
-                  <p key={i} className="text-blue-600">
-                    {s.document_title || s.document_id?.substring(0, 12)} ({s.score ? `${(s.score * 100).toFixed(0)}%` : "direct"})
-                  </p>
+          <div className="shrink-0 px-5 py-2 border-t border-slate-100 bg-slate-50/50">
+            <details className="group">
+              <summary className="text-[11px] font-medium text-slate-400 cursor-pointer hover:text-slate-600 transition-colors list-none flex items-center gap-1.5">
+                <svg className={`w-3 h-3 transition-transform group-open:rotate-90`} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
+                </svg>
+                {sources.length} source{sources.length > 1 ? "s" : ""}
+              </summary>
+              <div className="flex flex-wrap gap-2 mt-2">
+                {sources.map((s, i) => (
+                  <span key={i} className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-white border border-slate-200 text-xs text-slate-600 shadow-sm">
+                    <span className="font-medium">{s.document_title || s.document_id?.slice(0, 8)}</span>
+                    <span className="text-slate-300">·</span>
+                    <span className="text-slate-400">{(s.score * 100).toFixed(0)}%</span>
+                  </span>
                 ))}
               </div>
             </details>
           </div>
         )}
 
-        <div className="border-t border-gray-200 px-6 py-3 shrink-0">
-          <div className="flex gap-2 max-w-3xl mx-auto">
-            <input value={question} onChange={e => setQuestion(e.target.value)}
-              placeholder={selectedDocs.length > 0 ? "Ask a question about selected documents..." : "Search & select documents first..."}
-              className="flex-1 px-4 py-2.5 text-sm border border-gray-200 rounded-xl outline-none focus:ring-2 focus:ring-blue-200 focus:border-blue-300 bg-gray-50"
-              onKeyDown={e => e.key === "Enter" && ask()} />
-            <button onClick={ask} disabled={loading || !question.trim()}
-              className="px-5 py-2.5 bg-blue-600 text-white rounded-xl text-sm font-medium hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition flex items-center gap-1.5">
-              {loading ? "..." : <><span>Send</span><span className="text-base">→</span></>}
+        {/* input */}
+        <div className="shrink-0 px-5 py-3 border-t border-slate-100">
+          <div className="flex items-center gap-2 bg-slate-50 rounded-2xl border border-slate-200 focus-within:ring-2 focus-within:ring-indigo-400/30 focus-within:border-indigo-400 transition-all">
+            <input ref={inputRef} value={question} onChange={e => setQuestion(e.target.value)}
+              onKeyDown={e => e.key === "Enter" && !e.shiftKey && send()}
+              className="flex-1 bg-transparent px-4 py-3 text-sm outline-none text-slate-700 placeholder:text-slate-400"
+              placeholder="Ask a question about your documents..."
+              disabled={loading} />
+            <button onClick={send} disabled={loading || !question.trim()}
+              className="mr-1.5 p-2 rounded-xl bg-gradient-to-r from-indigo-500 to-purple-500 text-white disabled:opacity-40 disabled:cursor-not-allowed transition-all hover:shadow-lg hover:shadow-indigo-500/30 active:scale-95">
+              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M6 12L3.269 3.126A59.768 59.768 0 0121.485 12 59.77 59.77 0 013.27 20.876L5.999 12zm0 0h7.5" />
+              </svg>
             </button>
           </div>
         </div>

@@ -77,6 +77,57 @@ class OCRService:
         except Exception:
             return "", 0
 
+    def _extract_embedded_images_text(self, file_path: str) -> str:
+        try:
+            doc = fitz.open(file_path)
+        except Exception:
+            return ""
+        tmp_dir = tempfile.mkdtemp(prefix="embimg_")
+        img_paths = []
+        try:
+            for page_idx, page in enumerate(doc):
+                img_list = page.get_images(full=True)
+                for img_idx, img_info in enumerate(img_list):
+                    xref = img_info[0]
+                    try:
+                        pix = fitz.Pixmap(doc, xref)
+                        if pix.n > 4:
+                            pix = fitz.Pixmap(fitz.csRGB, pix)
+                        out = os.path.join(tmp_dir, f"p{page_idx+1}_i{img_idx+1}.png")
+                        pix.save(out)
+                        pix = None
+                        img_paths.append(out)
+                    except Exception:
+                        continue
+        except Exception:
+            doc.close()
+            return ""
+        doc.close()
+        if not img_paths:
+            return ""
+        ocr = self._get_paddle()
+        if ocr is None:
+            ocr = self._fresh_paddle()
+        if ocr is None:
+            return ""
+        texts = []
+        for img_path in img_paths:
+            try:
+                result = ocr.ocr(img_path, cls=True)
+                if result and result[0]:
+                    page_text = []
+                    for line in result[0]:
+                        txt = line[1][0] if len(line) > 1 and line[1] else ""
+                        if txt.strip():
+                            page_text.append(txt.strip())
+                    if page_text:
+                        texts.append("\n".join(page_text))
+            except Exception:
+                continue
+        if texts:
+            return "\n\n".join(texts)
+        return ""
+
     def _is_text_sufficient(self, text: str, page_count: int) -> bool:
         if page_count == 0:
             return False
@@ -243,14 +294,19 @@ class OCRService:
         print(f"\n[OCR] Processing document: {file_path}")
         ext = os.path.splitext(file_path)[1].lower()
 
-        # Fast path: try direct text extraction for PDFs
         if ext == ".pdf":
             direct_text, page_count = self._extract_pymupdf_text(file_path)
             print(f"[OCR] PyMuPDF text extraction: {len(direct_text)} chars, {page_count} pages")
+            # Extract text from embedded images
+            t0 = __import__("time").time()
+            embedded_text = self._extract_embedded_images_text(file_path)
+            if embedded_text:
+                print(f"[OCR] Embedded images OCR: {len(embedded_text)} chars in {__import__('time').time()-t0:.1f}s")
+                direct_text = direct_text + "\n\n[Embedded Images]\n" + embedded_text
             if self._is_text_sufficient(direct_text, page_count):
-                print(f"[OCR] Direct text is sufficient ({len(direct_text.strip())//max(page_count,1)} chars/page > 50) - skipping OCR")
+                print(f"[OCR] Direct text + embedded images is sufficient ({len(direct_text.strip())//max(page_count,1)} chars/page > 50) - skipping full page OCR")
                 return {"text": direct_text, "page_count": page_count, "images": [], "source": "direct"}
-            print(f"[OCR] Direct text insufficient ({len(direct_text.strip())//max(page_count,1)} chars/page <= 50) - falling back to image OCR")
+            print(f"[OCR] Direct text insufficient ({len(direct_text.strip())//max(page_count,1)} chars/page <= 50) - falling back to full page image OCR")
 
         print(f"[OCR] Converting to images...")
         if ext == ".pdf":
