@@ -53,6 +53,7 @@ const TypingDots = () => (
 export default function Home() {
   const [tab, setTab] = useState<"chat" | "docs">("chat");
   const [toast, setToast] = useState("");
+  const [selectedChatDocs, setSelectedChatDocs] = useState<any[]>([]);
 
   const showToast = useCallback((m: string) => { setToast(m); setTimeout(() => setToast(""), 3000); }, []);
 
@@ -93,7 +94,7 @@ export default function Home() {
         {tab === "docs" ? (
           <AllDocumentsPage showToast={showToast} />
         ) : (
-          <ChatSection showToast={showToast} />
+          <ChatSection showToast={showToast} selectedDocs={selectedChatDocs} setSelectedDocs={setSelectedChatDocs} />
         )}
       </div>
 
@@ -504,12 +505,11 @@ function DocDetail({ doc, showToast, onDelete }: any) {
 /* ════════════════════════════════════════
    CHAT SECTION
    ════════════════════════════════════════ */
-function ChatSection({ showToast }: any) {
+function ChatSection({ showToast, selectedDocs, setSelectedDocs }: any) {
   const [question, setQuestion] = useState("");
   const [messages, setMessages] = useState<any[]>([]);
   const [loading, setLoading] = useState(false);
   const [docQuery, setDocQuery] = useState("");
-  const [selectedDocs, setSelectedDocs] = useState<any[]>([]);
   const [docs, setDocs] = useState<any[]>([]);
   const [sources, setSources] = useState<any[]>([]);
   const [sessions, setSessions] = useState<any[]>([]);
@@ -533,6 +533,15 @@ function ChatSection({ showToast }: any) {
       setMessages(msgs.map((m: any) => ({ role: m.role, content: m.content })));
       setActiveSessionId(sid);
       setShowSessions(false);
+      const storedIds: string[] = d?.document_ids || [];
+      if (storedIds.length > 0) {
+        const dr = await fetch(`${API}/api/v1/documents?q=&limit=200&organization_id=${ORG}`);
+        const dd = await dr.json();
+        const allDocs: any[] = dd?.documents || dd || [];
+        setSelectedDocs(allDocs.filter((x: any) => storedIds.includes(x.id)));
+      } else {
+        setSelectedDocs([]);
+      }
     } catch { }
   }, []);
 
@@ -560,8 +569,8 @@ function ChatSection({ showToast }: any) {
   };
 
   const toggleDoc = (doc: any) => {
-    setSelectedDocs(prev =>
-      prev.find(d => d.id === doc.id) ? prev.filter(d => d.id !== doc.id) : [...prev, doc]
+    setSelectedDocs((prev: any[]) =>
+      prev.find((d: any) => d.id === doc.id) ? prev.filter((d: any) => d.id !== doc.id) : [...prev, doc]
     );
     setDocQuery("");
     setDocs([]);
@@ -576,7 +585,7 @@ function ChatSection({ showToast }: any) {
     setSources([]);
 
     try {
-      const docIds = selectedDocs.map(d => d.id);
+      const docIds = selectedDocs.map((d: any) => d.id);
       const body: any = { question: q, organization_id: ORG, document_ids: docIds };
       if (activeSessionId) body.session_id = activeSessionId;
 
@@ -672,7 +681,7 @@ function ChatSection({ showToast }: any) {
         {selectedDocs.length > 0 && (
           <div className="shrink-0 flex items-center gap-2 px-5 py-2 bg-indigo-50/40 border-b border-indigo-100/50">
             <span className="text-[11px] font-semibold text-indigo-500 uppercase tracking-wider">Context:</span>
-            {selectedDocs.map(d => (
+            {selectedDocs.map((d: any) => (
               <span key={d.id}
                 className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-white border border-indigo-200 text-xs font-medium text-indigo-700 shadow-sm">
                 {d.title || d.id.slice(0, 8)}
