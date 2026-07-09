@@ -12,7 +12,12 @@ def _load_prompt(filename: str) -> str:
     path = os.path.join(PROMPTS_DIR, filename)
     if os.path.exists(path):
         with open(path, "r", encoding="utf-8") as f:
-            return f.read()
+            content = f.read()
+            log = get_logger()
+            log.info(f"Prompt loaded: {C.DIM}{filename}{C.RESET} ({len(content)} chars)")
+            return content
+    log = get_logger()
+    log.warn(f"Prompt file not found: {filename}")
     return ""
 
 
@@ -231,6 +236,8 @@ class ClassificationAgent:
             return self._heuristic_classify(text, filename)
 
         prompt = prompt_template.replace("{text}", text[:64000]).replace("{filename}", filename)
+        log.info(f"Prompt preview: {C.DIM}{prompt[:200].replace(chr(10), ' ')}...{C.RESET}")
+        log.info(f"Input text: {C.DIM}{len(text)} chars, filename='{filename}'{C.RESET}")
         try:
             t0 = __import__("time").time()
             log.info("Calling Groq API (llama-8b)...")
@@ -287,7 +294,8 @@ class CategoryExtractionAgent:
             return {"extracted_data": {}, "confidence": 0.0}
 
         prompt = prompt_template.replace("{text}", text[:64000] if text else "")
-        log.info(f"Prompt loaded ({len(prompt_template)} chars), calling Groq API...")
+        log.info(f"Prompt loaded ({C.DIM}{agent}.md, {len(prompt_template)} chars{C.RESET})")
+        log.info(f"Prompt preview: {C.DIM}{prompt[:200].replace(chr(10), ' ')}...{C.RESET}")
 
         try:
             t0 = __import__("time").time()

@@ -77,6 +77,8 @@ class ChatService:
             sources.append({
                 "document_id": r["document_id"],
                 "document_title": r["document_title"],
+                "document_type": r.get("document_type", ""),
+                "phase3_agent": r.get("phase3_agent", ""),
                 "page_number": r["page_number"],
                 "score": r["score"],
             })
@@ -86,16 +88,25 @@ class ChatService:
 
         chat_log.search_strategy("Context Building", f"{len(search_results)} chunks → {context_len} chars")
         doc_types_seen = {}
+        agent_prompts_seen = {}
         for r in search_results:
             dt = r.get("document_type", "unknown")
             doc_types_seen[dt] = doc_types_seen.get(dt, 0) + 1
+            p3a = r.get("phase3_agent", "")
+            if p3a:
+                prompt_file = f"prompts/phase3/{p3a}.md"
+                agent_prompts_seen[prompt_file] = agent_prompts_seen.get(prompt_file, 0) + 1
         if doc_types_seen:
             chat_log.info(f"Document types: {', '.join(f'{k}={v}' for k, v in doc_types_seen.items())}")
+        if agent_prompts_seen:
+            chat_log.info(f"Agent prompts used: {', '.join(f'{k}' for k, v in agent_prompts_seen.items())}")
 
         unique_docs = list(set(r["document_id"] for r in search_results))
         chat_log.info(f"Unique documents: {len(unique_docs)}")
         for i, s in enumerate(sources[:5]):
-            chat_log.source_item(i, s["document_title"], s.get("document_type", ""), s["score"])
+            p3a = s.get("phase3_agent", "")
+            agent_tag = f" [{p3a}]" if p3a else ""
+            chat_log.source_item(i, s["document_title"], s.get("document_type", "") + agent_tag, s["score"])
 
         chat_log.llm_call("llama-3.3-70b-versatile", context_len, len(question), len(sources))
         llm_t0 = time.time()

@@ -393,15 +393,15 @@ class RAGService:
             from ..database import _local_select_in, _get_supabase, _use_supabase
             client = _get_supabase()
             if _use_supabase and client:
-                r = client.table("documents").select("id, title, document_type").in_("id", unique_ids).eq("organization_id", org_id).execute()
+                r = client.table("documents").select("id, title, document_type, phase3_agent").in_("id", unique_ids).eq("organization_id", org_id).execute()
                 if getattr(r, "data", None):
                     for row in r.data:
-                        titles[row["id"]] = (row.get("title", "") or "", row.get("document_type", "") or "")
+                        titles[row["id"]] = (row.get("title", "") or "", row.get("document_type", "") or "", row.get("phase3_agent", "") or "")
             else:
-                rows = _local_select_in("documents", columns="id, title, document_type",
+                rows = _local_select_in("documents", columns="id, title, document_type, phase3_agent",
                                         filters={"organization_id": org_id}, in_column="id", in_values=unique_ids)
                 for r in rows:
-                    titles[r["id"]] = (r.get("title", "") or "", r.get("document_type", "") or "")
+                    titles[r["id"]] = (r.get("title", "") or "", r.get("document_type", "") or "", r.get("phase3_agent", "") or "")
         except Exception:
             pass
         return titles
@@ -440,7 +440,7 @@ class RAGService:
                 for r in pinecone_results:
                     meta = r.get("metadata", {})
                     did = meta.get("document_id", "")
-                    title, dtype = title_map.get(did, ("", ""))
+                    title, dtype, p3a = title_map.get(did, ("", "", ""))
                     chunk_id = r.get("id", "")
                     if chunk_id in seen_ids:
                         continue
@@ -451,6 +451,7 @@ class RAGService:
                         "document_id": did,
                         "document_title": title,
                         "document_type": dtype or meta.get("_document_type"),
+                        "phase3_agent": p3a,
                         "chunk_text": meta.get("chunk_text", "")[:3000],
                         "page_number": meta.get("page_number"),
                         "score": r.get("score", 0),
@@ -484,13 +485,14 @@ class RAGService:
                     if chunk_id in seen_ids:
                         continue
                     seen_ids.add(chunk_id)
-                    title, dtype = title_map.get(did, ("", ""))
+                    title, dtype, p3a = title_map.get(did, ("", "", ""))
                     if document_type and dtype != document_type:
                         continue
                     results.append({
                         "document_id": did,
                         "document_title": title,
                         "document_type": dtype,
+                        "phase3_agent": p3a,
                         "chunk_text": item.get("content", "")[:3000],
                         "page_number": item.get("page_id"),
                         "score": 0.9,
@@ -546,13 +548,14 @@ class RAGService:
                             continue
                         seen_ids.add(chunk_id)
                         did = item.get("document_id", "")
-                        title, dtype = title_map.get(did, ("", ""))
+                        title, dtype, p3a = title_map.get(did, ("", "", ""))
                         if document_type and dtype != document_type:
                             continue
                         results.append({
                             "document_id": did,
                             "document_title": title,
                             "document_type": dtype,
+                            "phase3_agent": p3a,
                             "chunk_text": item.get("content", "")[:3000],
                             "page_number": item.get("page_id"),
                             "score": 0.7,
@@ -583,6 +586,8 @@ class RAGService:
             vector_results = {"data": []}
             vector_count = 0
 
+        vec_doc_ids = list(set(chunk.get("document_id", "") for chunk in (getattr(vector_results, "data", vector_results if isinstance(vector_results, list) else []) if isinstance(vector_results, (list, dict)) else [])))
+        vec_title_map = self._fetch_doc_titles(vec_doc_ids, organization_id) if vec_doc_ids else {}
         for item in getattr(vector_results, "data", vector_results if isinstance(vector_results, list) else []):
             chunk = item if isinstance(item, dict) else {}
             chunk_id = chunk.get("id", "")
@@ -591,10 +596,13 @@ class RAGService:
             seen_ids.add(chunk_id)
             if document_type and chunk.get("document_type") != document_type:
                 continue
+            did = chunk.get("document_id", "")
+            title, dtype, p3a = vec_title_map.get(did, ("", "", ""))
             results.append({
-                "document_id": chunk.get("document_id", ""),
-                "document_title": chunk.get("document_title", ""),
-                "document_type": chunk.get("document_type"),
+                "document_id": did,
+                "document_title": title or chunk.get("document_title", ""),
+                "document_type": dtype or chunk.get("document_type"),
+                "phase3_agent": p3a,
                 "chunk_text": chunk.get("content", chunk.get("chunk_text", "")),
                 "page_number": chunk.get("page_number", chunk.get("page_id")),
                 "score": chunk.get("similarity", chunk.get("score", 0)),
