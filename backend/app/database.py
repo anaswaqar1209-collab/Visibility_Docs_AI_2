@@ -184,6 +184,23 @@ def _init_local_db(conn):
             created_at TEXT DEFAULT (datetime('now'))
         );
         CREATE INDEX IF NOT EXISTS idx_chat_messages_session ON chat_messages(session_id);
+        CREATE TABLE IF NOT EXISTS user_profiles (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id TEXT UNIQUE NOT NULL,
+            email TEXT NOT NULL,
+            organization_id TEXT NOT NULL DEFAULT 'default-org',
+            created_at TEXT DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_user_profiles_user_id ON user_profiles(user_id);
+        CREATE TABLE IF NOT EXISTS users (
+            id TEXT PRIMARY KEY,
+            email TEXT UNIQUE NOT NULL,
+            hashed_password TEXT NOT NULL,
+            organization_id TEXT NOT NULL,
+            created_at TEXT DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
+        CREATE INDEX IF NOT EXISTS idx_users_org ON users(organization_id);
     """)
     try:
         conn.executescript("""
@@ -479,6 +496,99 @@ class SupabaseDB:
         conn.execute("DELETE FROM chat_messages WHERE session_id=?", (session_id,))
         conn.execute("DELETE FROM chat_sessions WHERE id=?", (session_id,))
         conn.commit()
+
+
+def create_user(user_id: str, email: str, hashed_password: str, organization_id: str) -> dict:
+    try:
+        client = _get_supabase()
+        if _use_supabase and client:
+            result = client.table("users").insert({
+                "id": user_id, "email": email, "hashed_password": hashed_password,
+                "organization_id": organization_id,
+            }).execute()
+            if result.data:
+                return result.data[0]
+    except Exception:
+        pass
+    conn = _get_local_db()
+    conn.execute("INSERT OR REPLACE INTO users (id, email, hashed_password, organization_id) VALUES (?,?,?,?)",
+                 (user_id, email, hashed_password, organization_id))
+    conn.commit()
+    row = conn.execute("SELECT * FROM users WHERE id=?", (user_id,)).fetchone()
+    return dict(row) if row else {"id": user_id, "email": email, "organization_id": organization_id}
+
+
+def get_user_by_email(email: str) -> dict | None:
+    try:
+        client = _get_supabase()
+        if _use_supabase and client:
+            result = client.table("users").select("*").eq("email", email).maybe_single().execute()
+            if getattr(result, "data", None):
+                return result.data
+    except Exception:
+        pass
+    conn = _get_local_db()
+    row = conn.execute("SELECT * FROM users WHERE email=?", (email,)).fetchone()
+    return dict(row) if row else None
+
+
+def get_user_by_id(user_id: str) -> dict | None:
+    try:
+        client = _get_supabase()
+        if _use_supabase and client:
+            result = client.table("users").select("*").eq("id", user_id).maybe_single().execute()
+            if getattr(result, "data", None):
+                return result.data
+    except Exception:
+        pass
+    conn = _get_local_db()
+    row = conn.execute("SELECT * FROM users WHERE id=?", (user_id,)).fetchone()
+    return dict(row) if row else None
+
+
+def create_user_profile(user_id: str, email: str, organization_id: str = None) -> dict:
+    if not organization_id:
+        import uuid
+        organization_id = uuid.uuid4().hex[:12]
+    try:
+        client = _get_supabase()
+        if _use_supabase and client:
+            result = client.table("user_profiles").insert({
+                "user_id": user_id,
+                "email": email,
+                "organization_id": organization_id,
+            }).execute()
+            if result.data:
+                return result.data[0]
+    except Exception:
+        pass
+    conn = _get_local_db()
+    try:
+        conn.execute("SELECT id FROM user_profiles WHERE user_id=?", (user_id,)).fetchone()
+    except Exception:
+        _init_local_db(conn)
+    conn.execute("INSERT OR REPLACE INTO user_profiles (user_id, email, organization_id) VALUES (?,?,?)",
+                 (user_id, email, organization_id))
+    conn.commit()
+    row = conn.execute("SELECT * FROM user_profiles WHERE user_id=?", (user_id,)).fetchone()
+    return dict(row) if row else {"user_id": user_id, "email": email, "organization_id": organization_id}
+
+
+def get_user_profile(user_id: str) -> dict | None:
+    try:
+        client = _get_supabase()
+        if _use_supabase and client:
+            result = client.table("user_profiles").select("*").eq("user_id", user_id).maybe_single().execute()
+            if getattr(result, "data", None):
+                return result.data
+    except Exception:
+        pass
+    conn = _get_local_db()
+    try:
+        row = conn.execute("SELECT * FROM user_profiles WHERE user_id=?", (user_id,)).fetchone()
+        return dict(row) if row else None
+    except Exception:
+        return None
 
 
 def _local_insert(table: str, data: dict):

@@ -145,6 +145,25 @@ class ProcessRequest(BaseModel):
     organization_id: str
 
 
+class SignupRequest(BaseModel):
+    email: str
+    password: str
+
+class LoginRequest(BaseModel):
+    email: str
+    password: str
+
+class AuthResponse(BaseModel):
+    token: str
+    user_id: str
+    email: str
+    organization_id: str
+
+class UserMe(BaseModel):
+    user_id: str
+    email: str
+    organization_id: str
+
 class ProcessResponse(BaseModel):
     document_id: str
     status: str

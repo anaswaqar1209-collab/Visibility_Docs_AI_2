@@ -1,8 +1,16 @@
 "use client";
 import { useState, useRef, useEffect, useCallback } from "react";
+import { useRouter } from "next/navigation";
+import { useAuth } from "@/lib/AuthContext";
 
 const API = "http://127.0.0.1:8000";
-const ORG = "default-org";
+
+function authFetch(token: string, url: string, opts?: RequestInit) {
+  return fetch(url, {
+    ...opts,
+    headers: { ...opts?.headers, Authorization: `Bearer ${token}` },
+  });
+}
 
 /* ───────────── helpers ───────────── */
 
@@ -51,11 +59,20 @@ const TypingDots = () => (
 
 /* ───────────── main page ───────────── */
 export default function Home() {
+  const router = useRouter();
+  const { orgId, token, loading, user, logout } = useAuth();
   const [tab, setTab] = useState<"chat" | "docs">("chat");
   const [toast, setToast] = useState("");
   const [selectedChatDocs, setSelectedChatDocs] = useState<any[]>([]);
 
   const showToast = useCallback((m: string) => { setToast(m); setTimeout(() => setToast(""), 3000); }, []);
+
+  useEffect(() => {
+    if (!loading && !user) router.push("/login");
+  }, [loading, user, router]);
+
+  if (loading) return <div className="h-screen flex items-center justify-center bg-gradient-surface"><div className="spinner-sm" /></div>;
+  if (!user) return null;
 
   return (
     <div className="h-screen flex flex-col bg-gradient-surface">
@@ -86,15 +103,25 @@ export default function Home() {
                 📄 Documents
               </button>
             </div>
+            <div className="flex items-center gap-3 pl-4 border-l border-slate-200">
+              <span className="text-xs text-slate-400 hidden sm:block">{user?.email}</span>
+              <button onClick={async () => { await logout(); router.push("/login"); }}
+                className="p-2 rounded-xl text-slate-400 hover:text-red-500 hover:bg-red-50 transition-all"
+                title="Logout">
+                <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" />
+                </svg>
+              </button>
+            </div>
           </div>
         </div>
       </header>
 
       <div className="flex-1 flex overflow-hidden">
         {tab === "docs" ? (
-          <AllDocumentsPage showToast={showToast} />
+          <AllDocumentsPage showToast={showToast} orgId={orgId} token={token} />
         ) : (
-          <ChatSection showToast={showToast} selectedDocs={selectedChatDocs} setSelectedDocs={setSelectedChatDocs} />
+          <ChatSection showToast={showToast} selectedDocs={selectedChatDocs} setSelectedDocs={setSelectedChatDocs} orgId={orgId} token={token} />
         )}
       </div>
 
@@ -114,7 +141,7 @@ export default function Home() {
 function loadSeen(): Set<string> { try { const r = localStorage.getItem("sc"); return new Set(r ? JSON.parse(r) : []); } catch { return new Set(); } }
 function saveSeen(id: string) { try { const r = localStorage.getItem("sc"); const a: string[] = r ? JSON.parse(r) : []; if (!a.includes(id)) { a.push(id); localStorage.setItem("sc", JSON.stringify(a)); } } catch {} }
 
-function AllDocumentsPage({ showToast }: any) {
+function AllDocumentsPage({ showToast, orgId, token }: any) {
   const [docs, setDocs] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [selected, setSelected] = useState<any>(null);
@@ -128,7 +155,7 @@ function AllDocumentsPage({ showToast }: any) {
 
   async function load() {
     try {
-      const r = await fetch(`${API}/api/v1/documents?q=&limit=200&organization_id=${ORG}`);
+      const r = await authFetch(token, `${API}/api/v1/documents?q=&limit=200&organization_id=${orgId}`);
       const d = await r.json();
       const newDocs: any[] = d?.documents || d || [];
 
@@ -174,10 +201,10 @@ function AllDocumentsPage({ showToast }: any) {
 
   const handleTypeChange = async (docId: string, newType: string) => {
     try {
-      await fetch(`${API}/api/v1/documents/${docId}`, {
+      await authFetch(token, `${API}/api/v1/documents/${docId}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ document_type: newType, organization_id: ORG }),
+        body: JSON.stringify({ document_type: newType, organization_id: orgId }),
       });
       setDocs(prev => prev.map(d => d.id === docId ? { ...d, document_type: newType } : d));
       nextInQueue();
@@ -321,6 +348,7 @@ function ClassifyPopup({ doc, queueLen = 1, onConfirm, onDismiss }: any) {
 
 /* ─────── Upload Box ─────── */
 function UploadBox({ onUpload }: any) {
+  const { orgId, token } = useAuth();
   const [files, setFiles] = useState<File[]>([]);
   const [uploading, setUploading] = useState(false);
   const [drag, setDrag] = useState(false);
@@ -338,9 +366,9 @@ function UploadBox({ onUpload }: any) {
     for (let i = 0; i < files.length; i++) {
       const fd = new FormData();
       fd.append("file", files[i]);
-      fd.append("organization_id", ORG);
+      fd.append("organization_id", orgId);
       try {
-        const r = await fetch(`${API}/api/v1/documents/upload`, { method: "POST", body: fd });
+        const r = await authFetch(token, `${API}/api/v1/documents/upload`, { method: "POST", body: fd });
         const data = await r.json();
         if (data?.id) ids.push(data.id);
       } catch { }
@@ -350,7 +378,7 @@ function UploadBox({ onUpload }: any) {
 
     const poll = setInterval(async () => {
       try {
-        const r = await fetch(`${API}/api/v1/documents?q=&limit=200&organization_id=${ORG}`);
+        const r = await authFetch(token, `${API}/api/v1/documents?q=&limit=200&organization_id=${orgId}`);
         const d = await r.json();
         const allDocs: any[] = d?.documents || d || [];
         const done: string[] = [];
@@ -419,16 +447,17 @@ function UploadBox({ onUpload }: any) {
 
 /* ─────── Doc Detail ─────── */
 function DocDetail({ doc, showToast, onDelete }: any) {
+  const { orgId, token } = useAuth();
   const [similar, setSimilar] = useState<any[]>([]);
 
   useEffect(() => {
-    fetch(`${API}/api/v1/search/similar/${doc.id}?organization_id=${ORG}`)
+    authFetch(token, `${API}/api/v1/search/similar/${doc.id}?organization_id=${orgId}`)
       .then(r => r.json()).then(d => setSimilar(d?.results || d || [])).catch(() => {});
   }, [doc.id]);
 
   const del = async () => {
     if (!confirm("Delete this document?")) return;
-    await fetch(`${API}/api/v1/documents/${doc.id}?organization_id=${ORG}`, { method: "DELETE" });
+    await authFetch(token, `${API}/api/v1/documents/${doc.id}?organization_id=${orgId}`, { method: "DELETE" });
     showToast("Document deleted");
     onDelete?.();
   };
@@ -465,7 +494,7 @@ function DocDetail({ doc, showToast, onDelete }: any) {
       </div>
 
       {doc.original_file_url && (
-        <a href={`${API}/api/v1/documents/${doc.id}/file?organization_id=${ORG}`} target="_blank"
+        <a href={`${API}/api/v1/documents/${doc.id}/file?organization_id=${orgId}`} target="_blank"
           className="btn btn-outline btn-sm mb-6 border-slate-300 text-slate-600 hover:bg-slate-100">
           <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
             <path strokeLinecap="round" strokeLinejoin="round" d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
@@ -505,7 +534,7 @@ function DocDetail({ doc, showToast, onDelete }: any) {
 /* ════════════════════════════════════════
    CHAT SECTION
    ════════════════════════════════════════ */
-function ChatSection({ showToast, selectedDocs, setSelectedDocs }: any) {
+function ChatSection({ showToast, selectedDocs, setSelectedDocs, orgId, token }: any) {
   const [question, setQuestion] = useState("");
   const [messages, setMessages] = useState<any[]>([]);
   const [loading, setLoading] = useState(false);
@@ -521,13 +550,13 @@ function ChatSection({ showToast, selectedDocs, setSelectedDocs }: any) {
   useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: "smooth" }); }, [messages, loading]);
 
   useEffect(() => {
-    fetch(`${API}/api/v1/chat/sessions?organization_id=${ORG}`)
+    authFetch(token, `${API}/api/v1/chat/sessions?organization_id=${orgId}`)
       .then(r => r.json()).then(d => setSessions(d?.sessions || d || [])).catch(() => {});
   }, []);
 
   const loadSession = useCallback(async (sid: string) => {
     try {
-      const r = await fetch(`${API}/api/v1/chat/sessions/${sid}?organization_id=${ORG}`);
+      const r = await authFetch(token, `${API}/api/v1/chat/sessions/${sid}?organization_id=${orgId}`);
       const d = await r.json();
       const msgs = d?.messages || [];
       setMessages(msgs.map((m: any) => ({ role: m.role, content: m.content })));
@@ -535,7 +564,7 @@ function ChatSection({ showToast, selectedDocs, setSelectedDocs }: any) {
       setShowSessions(false);
       const storedIds: string[] = d?.document_ids || [];
       if (storedIds.length > 0) {
-        const dr = await fetch(`${API}/api/v1/documents?q=&limit=200&organization_id=${ORG}`);
+        const dr = await authFetch(token, `${API}/api/v1/documents?q=&limit=200&organization_id=${orgId}`);
         const dd = await dr.json();
         const allDocs: any[] = dd?.documents || dd || [];
         setSelectedDocs(allDocs.filter((x: any) => storedIds.includes(x.id)));
@@ -553,7 +582,7 @@ function ChatSection({ showToast, selectedDocs, setSelectedDocs }: any) {
   };
 
   const deleteSession = async (sid: string) => {
-    await fetch(`${API}/api/v1/chat/sessions/${sid}?organization_id=${ORG}`, { method: "DELETE" });
+    await authFetch(token, `${API}/api/v1/chat/sessions/${sid}?organization_id=${orgId}`, { method: "DELETE" });
     setSessions(prev => prev.filter(s => s.id !== sid));
     if (activeSessionId === sid) newSession();
   };
@@ -562,7 +591,7 @@ function ChatSection({ showToast, selectedDocs, setSelectedDocs }: any) {
     setDocQuery(q);
     if (!q.trim()) { setDocs([]); return; }
     try {
-      const r = await fetch(`${API}/api/v1/documents?q=${encodeURIComponent(q)}&limit=10&organization_id=${ORG}`);
+      const r = await authFetch(token, `${API}/api/v1/documents?q=${encodeURIComponent(q)}&limit=10&organization_id=${orgId}`);
       const d = await r.json();
       setDocs(d?.documents || d || []);
     } catch { }
@@ -586,10 +615,10 @@ function ChatSection({ showToast, selectedDocs, setSelectedDocs }: any) {
 
     try {
       const docIds = selectedDocs.map((d: any) => d.id);
-      const body: any = { question: q, organization_id: ORG, document_ids: docIds };
+      const body: any = { question: q, organization_id: orgId, document_ids: docIds };
       if (activeSessionId) body.session_id = activeSessionId;
 
-      const r = await fetch(`${API}/api/v1/chat`, {
+      const r = await authFetch(token, `${API}/api/v1/chat`, {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
       });
@@ -599,7 +628,7 @@ function ChatSection({ showToast, selectedDocs, setSelectedDocs }: any) {
       if (data.session_id) setActiveSessionId(data.session_id);
       if (data.sources) setSources(data.sources);
 
-      fetch(`${API}/api/v1/chat/sessions?organization_id=${ORG}`)
+      authFetch(token, `${API}/api/v1/chat/sessions?organization_id=${orgId}`)
         .then(r => r.json()).then(d => setSessions(d?.sessions || d || [])).catch(() => {});
 
     } catch { setMessages(prev => [...prev, { role: "assistant", content: "⚠️ Connection error. Please check the backend." }]); }
