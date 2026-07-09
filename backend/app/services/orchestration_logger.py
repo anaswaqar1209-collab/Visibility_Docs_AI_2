@@ -50,6 +50,10 @@ BL = "+-"  # bottom-left
 BR = "-+"  # bottom-right
 
 
+def _plural(n: int, word: str) -> str:
+    return f"{n} {word}{'s' if n != 1 else ''}"
+
+
 class OrchestrationLogger:
     def __init__(self, document_title: str = "", document_id: str = ""):
         self.document_title = document_title
@@ -128,6 +132,62 @@ class OrchestrationLogger:
     def divider(self):
         print(f"  {C.DIM}{H*62}{C.RESET}")
 
+    # ── Chat-specific methods ──
+
+    def chat_start(self, question: str, session_id: str = "", doc_count: int = 0):
+        print()
+        print(f"  {C.BOLD}{C.WHITE}+{H*60}+{C.RESET}")
+        print(f"  {C.BOLD}{C.WHITE}{V}{C.RESET}  {C.BOLD}{C.BLUE}VISIBILITY DOCS AI - CHAT ORCHESTRATION{C.RESET}{C.WHITE}  {V}{C.RESET}")
+        print(f"  {C.BOLD}{C.WHITE}+{H*60}+{C.RESET}")
+        print()
+        print(f"  {C.BOLD}{C.YELLOW}[Q]{C.RESET}  {question}")
+        if session_id:
+            print(f"  {C.DIM}   Session: {session_id}{C.RESET}")
+        if doc_count:
+            print(f"  {C.DIM}   Documents attached: {doc_count}{C.RESET}")
+
+    def search_strategy(self, name: str, params: str = ""):
+        step_str = f"SEARCH — {name}"
+        print()
+        print(f"  {C.BOLD}{C.CYAN}+-{step_str} {TR}{C.RESET}")
+        print(f"  {C.CYAN}{V}{C.RESET}")
+        if params:
+            self._line(f"Params: {C.DIM}{params}{C.RESET}")
+
+    def search_result(self, strategy: str, found: int, new: int, extra: str = ""):
+        icon = C.GREEN + "[OK]" if found > 0 else C.YELLOW + "[!]"
+        label = f"{icon}{C.RESET}  {strategy} returned {C.BOLD}{_plural(found, 'result')}{C.RESET}"
+        if new > 0:
+            label += f" ({new} new)"
+        if extra:
+            label += f" | {extra}"
+        self._line(label)
+
+    def source_item(self, idx: int, title: str, doc_type: str, score: float):
+        connector = "├─" if idx > 0 else " └─"
+        self._line(f" {connector} {C.BOLD}{title}{C.RESET}  ({C.DIM}{doc_type}, score: {score:.2f}{C.RESET})")
+
+    def llm_call(self, model: str, context_len: int, question_len: int, source_count: int):
+        print()
+        print(f"  {C.BOLD}{C.CYAN}+-LLM CALL {TR}{C.RESET}")
+        print(f"  {C.CYAN}{V}{C.RESET}")
+        self._line(f"Model: {C.BOLD}{model}{C.RESET}")
+        self._line(f"Context: {_plural(context_len, 'char')} from {_plural(source_count, 'source')}")
+        self._line(f"Question: {_plural(question_len, 'char')}")
+        self._line("Calling Groq API...")
+
+    def llm_response(self, duration: float, output_chars: int, finish_reason: str = "stop"):
+        self._line(f"  {C.GREEN}[OK]{C.RESET}  Response received in {C.BOLD}{duration:.1f}s{C.RESET} ({_plural(output_chars, 'char')})")
+        if finish_reason:
+            self._line(f"     Finish reason: {C.DIM}{finish_reason}{C.RESET}")
+
+    def chat_end(self, total_time: float, sources_count: int):
+        print()
+        print(f"  {C.BOLD}{C.GREEN}+{H*60}+{C.RESET}")
+        print(f"  {C.BOLD}{C.GREEN}{V}{C.RESET}  {C.GREEN_BG}{C.BLACK} [OK] {C.RESET}  {C.BOLD}CHAT COMPLETE{C.RESET}  |  {_plural(sources_count, 'source')}  |  Total: {C.BOLD}{total_time:.1f}s{C.RESET}  {C.GREEN}{V}{C.RESET}")
+        print(f"  {C.BOLD}{C.GREEN}+{H*60}+{C.RESET}")
+        print()
+
 
 # Singleton
 _orch_logger: OrchestrationLogger | None = None
@@ -143,4 +203,12 @@ def get_logger() -> OrchestrationLogger:
 def reset_logger(title: str = "", doc_id: str = "") -> OrchestrationLogger:
     global _orch_logger
     _orch_logger = OrchestrationLogger(title, doc_id)
+    return _orch_logger
+
+
+def get_chat_logger() -> OrchestrationLogger:
+    """Get a singleton logger instance for chat orchestration."""
+    global _orch_logger
+    if _orch_logger is None:
+        _orch_logger = OrchestrationLogger()
     return _orch_logger

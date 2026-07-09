@@ -1,9 +1,14 @@
+import time
+import logging
 from langchain_core.chat_history import BaseChatMessageHistory, InMemoryChatMessageHistory
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.runnables.history import RunnableWithMessageHistory
 from langchain_groq import ChatGroq
 from ..config import settings
+from .orchestration_logger import get_chat_logger, C
+
+_logger = logging.getLogger("visibility-docs")
 
 _store: dict[str, InMemoryChatMessageHistory] = {}
 
@@ -59,6 +64,8 @@ class ConversationService:
         sid = session_id or "default"
         history = get_session_history(sid)
         if history.messages:
+            chat_log = get_chat_logger()
+            chat_log.info(f"History already in memory for session '{sid}' ({len(history.messages)} msgs)")
             return
         for msg in messages:
             role = msg.get("role")
@@ -67,6 +74,9 @@ class ConversationService:
                 history.add_user_message(content)
             elif role == "assistant":
                 history.add_ai_message(content)
+        if messages:
+            chat_log = get_chat_logger()
+            chat_log.info(f"Loaded {len(messages)} messages from DB into session '{sid}'")
 
     def set_last_context(self, session_id: str, context: str):
         if session_id:
@@ -79,19 +89,28 @@ class ConversationService:
         if not self._chain_with_history:
             return "Groq API is not configured."
 
+        chat_log = get_chat_logger()
         config = {"configurable": {"session_id": session_id or "default"}} if session_id else \
                  {"configurable": {"session_id": "default"}}
 
         if is_followup and not context:
             context = self.get_last_context(session_id)
+            chat_log.info(f"No new context — reusing previous session context ({len(context)} chars)")
 
         if context:
             self.set_last_context(session_id, context)
 
+        chat_log.info(f"Invoking LangChain chain: model=llama-3.3-70b-versatile, followup={is_followup}")
+        _logger.info(f"[CHAT] session={session_id}, context_len={len(context)}, is_followup={is_followup}")
+        t0 = time.time()
         response = self._chain_with_history.invoke(
             {"context": context, "question": question},
             config=config,
         )
+        duration = time.time() - t0
+        output_len = len(response.content)
+        chat_log.info(f"LangChain invoke done: {output_len} chars in {duration:.1f}s")
+        _logger.info(f"[CHAT] LLM response: {output_len} chars in {duration:.1f}s")
         return response.content
 
     def get_history(self, session_id: str = None) -> list[dict]:

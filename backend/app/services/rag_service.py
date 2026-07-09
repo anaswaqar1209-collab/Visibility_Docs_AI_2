@@ -407,6 +407,9 @@ class RAGService:
         return titles
 
     def hybrid_search(self, query: str, organization_id: str, document_type: str = None, document_ids: list = None, limit: int = 10, offset: int = 0) -> list[dict]:
+        from .orchestration_logger import get_chat_logger
+        chat_log = get_chat_logger()
+
         print(f"\n[SEARCH] Query: '{query}' | org={organization_id} | type={document_type or 'all'} | docs={document_ids or 'all'} | limit={limit}")
         query_embedding = embedding_service.embed_query(query)
         results = []
@@ -415,6 +418,13 @@ class RAGService:
         query_words = [w for w in re.sub(r'[^\w\s]', ' ', query).lower().split() if len(w) > 2]
 
         # 1. Pinecone vector search (handles typos via embeddings)
+        pinecone_filter_desc = []
+        if document_type:
+            pinecone_filter_desc.append(f"type={document_type}")
+        if document_ids:
+            pinecone_filter_desc.append(f"doc_ids={len(document_ids)}")
+        chat_log.search_strategy("Pinecone Vector Search", ", ".join(pinecone_filter_desc) if pinecone_filter_desc else "no filter")
+        pinecone_before = len(results)
         if pinecone_service.available:
             filter_dict = {"organization_id": organization_id}
             if document_type:
@@ -446,11 +456,20 @@ class RAGService:
                         "score": r.get("score", 0),
                         "metadata": meta,
                     })
-                print(f"[SEARCH] Pinecone results processed: {len(results)} unique chunks")
+                scores = [r.get("score", 0) for r in pinecone_results]
+                score_range = f"top={max(scores):.3f}, bottom={min(scores):.3f}" if scores else ""
+                new_count = len(results) - pinecone_before
+                chat_log.search_result("Pinecone", len(pinecone_results), new_count, score_range)
+                print(f"[SEARCH] Pinecone results processed: {new_count} new / {len(results)} total unique")
             else:
+                chat_log.search_result("Pinecone", 0, 0, "no results")
                 print(f"[SEARCH] Pinecone returned no results")
+        else:
+            chat_log.search_result("Pinecone", 0, 0, "unavailable")
 
         # 2. FTS5 keyword search (prefix matching)
+        fts5_before = len(results)
+        chat_log.search_strategy("FTS5 Keyword Search", f"words: {len(query_words)}")
         print(f"[SEARCH] Running keyword search (FTS5)...")
         try:
             from ..database import _local_keyword_search
@@ -477,16 +496,23 @@ class RAGService:
                         "score": 0.9,
                         "metadata": item.get("metadata"),
                     })
-                print(f"[SEARCH] Keywords contributed {len(kw_results)} results")
+                new_count = len(results) - fts5_before
+                chat_log.search_result("FTS5", len(kw_results), new_count)
+                print(f"[SEARCH] Keywords contributed {new_count} new results")
             else:
+                chat_log.search_result("FTS5", 0, 0, "no results")
                 print(f"[SEARCH] FTS5 returned nothing")
-        except Exception:
+        except Exception as e:
+            chat_log.search_result("FTS5", 0, 0, f"error: {e}")
             pass
 
         # 3. Per-word LIKE search (typo-tolerant partial matching)
+        like_before = len(results)
+        chat_log.search_strategy("Per-word LIKE Search (typo-tolerant)", f"{len(query_words)} words: {query_words[:5]}")
         try:
             like_results = set()
             seen_like = set()
+            word_hits = {}
             for word in query_words:
                 wr = SupabaseDB.select(
                     "document_chunks",
@@ -496,6 +522,7 @@ class RAGService:
                 )
                 wdata = getattr(wr, "data", wr if isinstance(wr, list) else [])
                 if isinstance(wdata, list):
+                    word_hits[word] = len(wdata)
                     for item in wdata:
                         if isinstance(item, dict) and item.get("id") not in seen_like:
                             seen_like.add(item.get("id"))
@@ -531,10 +558,18 @@ class RAGService:
                             "score": 0.7,
                             "metadata": item.get("metadata"),
                         })
-        except Exception:
+                new_count = len(results) - like_before
+                word_breakdown = ", ".join(f"{w}={h}" for w, h in word_hits.items() if h > 0)
+                chat_log.search_result("LIKE", len(like_results), new_count, word_breakdown)
+            else:
+                chat_log.search_result("LIKE", 0, 0, "no matches")
+        except Exception as e:
+            chat_log.search_result("LIKE", 0, 0, f"error: {e}")
             pass
 
         # 4. Supabase vector search (handles typos via embeddings)
+        sqs_before = len(results)
+        chat_log.search_strategy("Supabase Vector Search", f"threshold=0.5, top_k={limit * 2}")
         try:
             vector_results = SupabaseDB.search_vector(
                 "document_chunks",
@@ -543,8 +578,10 @@ class RAGService:
                 match_count=limit * 2,
                 filter_org_id=organization_id,
             )
+            vector_count = len(getattr(vector_results, "data", vector_results if isinstance(vector_results, list) else []))
         except Exception:
             vector_results = {"data": []}
+            vector_count = 0
 
         for item in getattr(vector_results, "data", vector_results if isinstance(vector_results, list) else []):
             chunk = item if isinstance(item, dict) else {}
@@ -563,12 +600,19 @@ class RAGService:
                 "score": chunk.get("similarity", chunk.get("score", 0)),
                 "metadata": chunk.get("metadata"),
             })
+        new_count = len(results) - sqs_before
+        chat_log.search_result("Supabase Vector", vector_count, new_count)
 
         results = sorted(results, key=lambda x: x["score"], reverse=True)
         if document_ids:
             doc_set = set(document_ids)
             results = [r for r in results if r["document_id"] in doc_set]
-        return results[offset:offset + limit]
+        final = results[offset:offset + limit]
+        chat_log.info(f"Total after sort+filter: {len(final)} chunks (from {len(results)} unique, {len(seen_ids)} total seen)")
+        top_scores = [f"{r['document_title'][:30]}: {r['score']:.3f}" for r in final[:3]]
+        if top_scores:
+            chat_log.info(f"Top results: {', '.join(top_scores)}")
+        return final
 
     def get_document_context(self, document_id: str, organization_id: str, max_chunks: int = 10) -> str:
         try:

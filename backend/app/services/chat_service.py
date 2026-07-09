@@ -1,6 +1,8 @@
+import time
 from .conversation_service import conversation_service
 from .rag_service import rag_service
 from ..database import SupabaseDB
+from .orchestration_logger import get_chat_logger, C
 
 
 class ChatService:
@@ -33,6 +35,10 @@ class ChatService:
 
     def chat_with_document(self, question: str, document_ids: list, organization_id: str,
                            chat_history: list[dict] = None, session_id: str = None) -> dict:
+        chat_log = get_chat_logger()
+        chat_log.chat_start(question, session_id=session_id or "", doc_count=len(document_ids or []))
+        t_start = time.time()
+
         sid, resolved_ids, is_first = self._get_or_create_session(session_id, organization_id, document_ids)
 
         if resolved_ids:
@@ -41,12 +47,21 @@ class ChatService:
             search_results = rag_service.hybrid_search(question, organization_id, limit=15)
 
         if not search_results:
+            chat_log.search_strategy("Context Building", "no results found")
+            chat_log.warn("No relevant documents found in search")
+            chat_log.llm_call("llama-3.3-70b-versatile", 0, len(question), 0)
             if is_first:
                 answer = "I could not find any relevant information in the selected documents."
+                llm_t0 = time.time()
                 conversation_service.chat(question, "", session_id=sid)
+                chat_log.llm_response(time.time() - llm_t0, len(answer))
             else:
+                llm_t0 = time.time()
                 answer = conversation_service.chat(question, "", session_id=sid, is_followup=True)
+                chat_log.llm_response(time.time() - llm_t0, len(answer))
             self._save_exchange(sid, question, answer, [], is_first)
+            total = time.time() - t_start
+            chat_log.chat_end(total, 0)
             return {
                 "answer": answer,
                 "sources": [],
@@ -67,10 +82,33 @@ class ChatService:
             })
 
         context = "\n\n".join(context_parts)
+        context_len = len(context)
 
-        answer = conversation_service.chat(question, context, session_id=sid, is_followup=not is_first)
+        chat_log.search_strategy("Context Building", f"{len(search_results)} chunks → {context_len} chars")
+        doc_types_seen = {}
+        for r in search_results:
+            dt = r.get("document_type", "unknown")
+            doc_types_seen[dt] = doc_types_seen.get(dt, 0) + 1
+        if doc_types_seen:
+            chat_log.info(f"Document types: {', '.join(f'{k}={v}' for k, v in doc_types_seen.items())}")
+
+        unique_docs = list(set(r["document_id"] for r in search_results))
+        chat_log.info(f"Unique documents: {len(unique_docs)}")
+        for i, s in enumerate(sources[:5]):
+            chat_log.source_item(i, s["document_title"], s.get("document_type", ""), s["score"])
+
+        chat_log.llm_call("llama-3.3-70b-versatile", context_len, len(question), len(sources))
+        llm_t0 = time.time()
+        is_followup = not is_first
+        answer = conversation_service.chat(question, context, session_id=sid, is_followup=is_followup)
+        chat_log.llm_response(time.time() - llm_t0, len(answer))
+
         history = conversation_service.get_history(sid)
         self._save_exchange(sid, question, answer, sources[:5], is_first)
+
+        total = time.time() - t_start
+        chat_log.chat_end(total, len(sources))
+        chat_log.info(f"Answer length: {len(answer)} chars")
 
         return {
             "answer": answer,
