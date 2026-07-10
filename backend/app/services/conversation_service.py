@@ -47,7 +47,7 @@ class ConversationService:
 
         sp = system_prompt or SYSTEM_PROMPT
         prompt = ChatPromptTemplate.from_messages([
-            ("system", sp),
+            SystemMessage(content=sp),
             MessagesPlaceholder(variable_name="history"),
             ("human", "Document Context:\n{context}\n\nQuestion: {question}"),
         ])
